@@ -1,0 +1,65 @@
+{
+  "plansDirectory": "./docs/plans",
+  "language": "english",
+  "alwaysThinkingEnabled": false,
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "context7"
+  ],
+  "autoUpdatesChannel": "stable",
+  "cleanupPeriodDays": 14,
+
+  "permissions": {
+    "allow": [
+      "Bash(pnpm:*)",
+      "Bash(npm:*)",
+      "Bash(git:*)",
+      "Bash(git ls-remote:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(cd:*)",
+      "Bash(cat:*)",
+      "Bash(which:*)",
+      "Bash(node:*)",
+      "Bash(corepack:*)",
+      "Bash(npx:*)",
+      "Bash(cd * && npx:*)",
+      "Bash(docker:*)",
+      "Bash(chmod:*)",
+      "Bash(osascript:*)",
+      "Bash(grep:*)",
+      "Bash(sed:*)",
+      "Bash(find:*)",
+      "Bash(mdfind:*)",
+      "Bash(bash .specify/scripts/**:*)",
+      "Bash(.specify/scripts/bash/**:*)",
+      "Bash(.specify/scripts/**:*)",
+      "Bash(**/.specify/scripts/**:*)",
+      "Bash(chmod * && bash .specify/scripts/**:*)",
+      "Bash(swift:*)",
+      "Bash(xcodebuild:*)",
+      "mcp__context7__*",
+      "WebSearch",
+      "WebFetch",
+      "Write",
+      "Bash"
+    ],
+    "deny": [
+      "Read(.env*)",
+      "Read(**/credentials*)",
+      "Bash(rm -rf:*)"
+    ],
+    "defaultMode": "acceptEdits"
+  },
+
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+
+  "env": {
+    "ENABLE_TOOL_SEARCH": "auto:5",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "85",
+    "MAX_MCP_OUTPUT_TOKENS": "30000"
+  }
+}

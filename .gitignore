@@ -1,0 +1,64 @@
+# Dependencies
+node_modules
+
+# Build outputs
+**/dist/
+**/build/
+**/out/
+
+# VCS / IDE
+.git/
+.vscode/
+.idea/
+
+# Env / secrets
+.env*
+
+# Logs
+**/logs/
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Generated docs (run generate-docs.sh to rebuild)
+# Auto-generated:
+docs/commands/
+docs/agents/
+docs/scripts/
+docs/adr/_index.md
+
+# Manual docs (NOT ignored):
+# - docs/index.md
+# - docs/quickstart.md
+# - docs/synthesize-roadmap.md
+# - docs/adr/*.md (except _index.md)
+
+# spec-kit runtime
+.specify/cache/
+.specify/scripts/**/*.log
+.specify/scripts/**/*.out
+*.tmp
+
+# Claude Code
+.claude/settings.local.json
+
+# Test dependencies
+.bats-core/
+
+# Xcode / Swift
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.moved-aside
+*.xcuserstate
+*.xcscmblueprint
+.build/
+.swiftpm/
+Package.resolved
+builds/

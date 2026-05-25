@@ -1,0 +1,52 @@
+name: Verborra
+options:
+  bundleIdPrefix: com.apeek
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: false
+
+packages:
+  swift-markdown:
+    url: https://github.com/swiftlang/swift-markdown
+    from: "0.4.0"
+  KeyboardShortcuts:
+    url: https://github.com/sindresorhus/KeyboardShortcuts
+    from: "2.0.0"
+
+targets:
+  Verborra:
+    type: application
+    platform: macOS
+    sources:
+      - path: Verborra
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.apeek.Verborra
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_FILE: Verborra/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Verborra/Verborra.entitlements
+        GENERATE_INFOPLIST_FILE: false
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: G292C8CN3X
+        CODE_SIGN_IDENTITY: "Apple Development"
+    dependencies:
+      - package: swift-markdown
+        product: Markdown
+      - package: KeyboardShortcuts
+        product: KeyboardShortcuts
+
+  VerborraTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: VerborraTests
+    settings:
+      base:
+        SWIFT_VERSION: "5.9"
+    dependencies:
+      - target: Verborra

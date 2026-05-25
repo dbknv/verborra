@@ -1,0 +1,174 @@
+import SwiftUI
+
+// MARK: - RecordingView
+
+struct RecordingView: View {
+    @Bindable var viewModel: RecordingViewModel
+    private let l10n = LocalizationManager.shared
+    private let permissionManager = PermissionManager.shared
+
+    var body: some View {
+        VStack(spacing: 16) {
+            if permissionManager.microphoneStatus != .granted {
+                noMicrophoneAccessView
+            } else {
+                switch viewModel.state {
+                case .idle:
+                    idleView
+                case .recording(let duration, let remaining):
+                    recordingView(duration: duration, remaining: remaining)
+                case .transcribing:
+                    transcribingView
+                case .formatting:
+                    formattingView
+                case .error(let error):
+                    errorView(error: error)
+                }
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.bottom, 24)
+        .padding(.top, 8)
+    }
+
+    // MARK: - States
+
+    private var noMicrophoneAccessView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "mic.slash.fill")
+                .font(.system(size: 40))
+                .foregroundStyle(.red)
+
+            Text(l10n.string("recording.noMicAccess.title"))
+                .font(.headline)
+                .foregroundStyle(.primary)
+
+            Text(l10n.string("recording.noMicAccess.description"))
+                .font(.body)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+
+            Button(l10n.string("recording.noMicAccess.openSettings")) {
+                viewModel.openSettings()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+
+    private var idleView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "mic.fill")
+                .font(.system(size: 40))
+                .foregroundStyle(.secondary)
+
+            Text(l10n.string("recording.idle.hint"))
+                .font(.headline)
+                .foregroundStyle(.secondary)
+
+            Text(l10n.string("recording.idle.maxDuration", args: viewModel.settings.maxRecordingDuration.displayName))
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func recordingView(duration: TimeInterval, remaining: TimeInterval) -> some View {
+        let isWarning = remaining <= 30 && remaining > 0
+
+        return VStack(spacing: 12) {
+            AudioWaveformView(audioLevel: viewModel.audioLevel)
+
+            Text(formatRemaining(remaining))
+                .font(.system(.title2, design: .monospaced))
+                .foregroundStyle(isWarning ? Color(hex: 0xD94040) : Color(hex: 0x9A9A9A))
+
+        }
+    }
+
+    private var transcribingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.large)
+
+            Text(l10n.string("recording.transcribing"))
+                .font(.headline)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var formattingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.large)
+
+            Text(l10n.string("recording.formatting"))
+                .font(.headline)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func errorView(error: RecordingError) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 36))
+                .foregroundStyle(.red)
+
+            Text(error.errorDescription ?? l10n.string("error.unknown"))
+                .font(.body)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.primary)
+
+            if case .apiKeyNotConfigured = error {
+                Button(l10n.string("recording.error.openSettings")) {
+                    viewModel.openSettings()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            if case .microphonePermissionDenied = error {
+                Button(l10n.string("recording.error.openSystemSettings")) {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            if case .accessibilityNotGranted = error {
+                Button(l10n.string("recording.error.openSystemSettings")) {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            if isRetryableError(error) {
+                Button {
+                    viewModel.retryFromError()
+                } label: {
+                    Label(l10n.string("recording.error.retry"), systemImage: "arrow.clockwise.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func isRetryableError(_ error: RecordingError) -> Bool {
+        switch error {
+        case .transcriptionFailed, .formattingFailed, .networkUnavailable, .silenceDetected, .emptyTranscription:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func formatRemaining(_ remaining: TimeInterval) -> String {
+        let total = max(0, Int(remaining))
+        let minutes = total / 60
+        let seconds = total % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
