@@ -251,6 +251,8 @@ Use with `get-library-docs` tool or ask: *"Find Node.js v24 documentation via co
 - N/A (in-memory audio buffers, UserDefaults for settings) (008-fix-async-concurrency)
 - Swift 5.9+ (Xcode 15+) + SwiftUI, AVFoundation, swift-markdown (0.4.0+), KeyboardShortcuts (2.0.0+), swift-atomics (1.2.0+) (012-vocabularies)
 - JSON files in `~/Library/Application Support/Verborra/` (vocabularies.json); UserDefaults / @AppStorage (personal preferences text) (012-vocabularies)
+- Swift 5.9+ (Xcode 15+) + SwiftUI, AppKit (NSPanel, NSAlert), AVFoundation (AVAudioEngine — уже используется), swift-markdown (4.0+ — уже используется для рендеринга), KeyboardShortcuts (sindresorhus — уже используется), swift-atomics (1.2+ — уже используется в стриминге) (013-dictation-flow-rework)
+- JSON файл `~/Library/Application Support/Verborra/system_prompts.json` (через существующий `PromptsStore`); UserDefaults для `promptsDataVersion` (013-dictation-flow-rework)
 
 ## Recent Changes
 - 001-voice-input: Added SwiftUI, AppKit (NSPanel), AVFoundation (AVAudioEngine), Security (Keychain), ServiceManagement (SMAppService), swift-markdown (swiftlang), KeyboardShortcuts (sindresorhus)
