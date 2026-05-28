@@ -11,6 +11,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 —
 
+## [1.2.0] - 2026-05-28
+
+Dictation flow rework: per-prompt control over question-answering on the first voice message, simplified default prompt, and chat continuation that finally behaves like a real chat.
+
+### Added
+
+- **"Answer questions in the first message?" toggle** on every editable prompt in Settings → System Prompts, with an inline `?` icon explaining the behavior. When off, the model formats your dictation and never answers — even if your speech contains a question. When on, the first voice message can become an exchange with the model and the dialogue continues in the chat window.
+- **Strengthened critical-instruction wording** for the "don't answer" mode, with explicit "MUST NOT" prohibitions and a concrete example / counter-example, so small models (e.g. `gpt-4.1-nano`) follow it reliably. Localized in all 10 supported languages.
+- **Streaming guard**: while the assistant is still streaming a reply, Send and the re-record voice button are disabled — no parallel requests, no half-formed payloads.
+
+### Changed
+
+- **Default behavior is now "format only"**: every prompt ships with the new toggle off. Previously the model would freely answer any question heard inside the first voice message. To restore the old behavior on a per-prompt basis, turn the toggle on in Settings → System Prompts.
+- **Chat continuation uses chat-mode instead of the dictation prompt**: after the first formatted reply, follow-up messages in the result window are no longer re-formatted as if they were new dictation. The model responds conversationally and the full session history is sent every time.
+- **`Simple Voice To Text` built-in prompt is simplified and read-only**: the content was tightened to "Fix spelling errors and add punctuation. Return only the corrected text." — no more paragraph splitting. The prompt cannot be edited or deleted; create a custom prompt if you need a different formatter.
+
+### Fixed
+
+- **Lost chat history bug**: previously, the non-streaming branch of a follow-up send transmitted only the latest text without the prior conversation, so the model responded "from scratch." Both paths now share a single context-composition path, and the full session history is included in every continuation request.
+- **Edited messages in the chat window**: edits made via the existing in-window edit UI are now reflected in the request payload. Previously the original (pre-edit) text leaked into follow-ups.
+
+### Migration
+
+- A one-time migration on first launch force-overwrites the stored `Simple Voice To Text` content with the new simplified phrasing. Any customizations of that built-in prompt from prior versions are wiped. The migration bumps the prompts data schema to v3 and runs once per install.
+- Custom user prompts keep their content; the new `answerQuestionsInFirstMessage` field defaults to off on first load.
+
+### Notes
+
+- History that exceeds the model's token budget is now trimmed in user/assistant pairs from the oldest end — never from the middle. The system prompt and the latest user message are always preserved.
+- Internal: the first voice turn now goes through the same streaming send path as continuation messages (`streamChat`). `streamFormat` is no longer the front door for the first turn — see `specs/013-dictation-flow-rework/` for the design history.
+
 ## [1.0.0] - 2026-05-22
 
 First public release. A complete, native macOS voice-input tool: global hotkey → record → OpenAI STT → LLM formatting → paste.
@@ -72,5 +103,6 @@ First public release. A complete, native macOS voice-input tool: global hotkey �
 - No telemetry. Network calls go only to the OpenAI API using the user-provided key.
 - Built with Swift 5.9+, SwiftUI, AppKit, AVFoundation, CoreAudio.
 
-[Unreleased]: https://github.com/dbknv/verborra/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/dbknv/verborra/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/dbknv/verborra/compare/v1.0.0...v1.2.0
 [1.0.0]: https://github.com/dbknv/verborra/releases/tag/v1.0.0

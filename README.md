@@ -23,7 +23,7 @@ The whole loop is designed to feel like Alfred / Raycast: instant, transient, ne
 
 - **Global hotkey** — configurable, recordable from the settings UI (powered by [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts)).
 - **OpenAI STT + LLM formatting** — pick your transcription model (`gpt-4o-mini-transcribe`, `gpt-4o-transcribe`, `whisper-1`) and formatting model (`gpt-4.1-nano`, `gpt-4o-mini`, `gpt-4.1-mini`, `gpt-5-nano`).
-- **Named system prompts** — keep multiple prompts (one is the default), switch between them in the overlay; switching re-runs the formatting pass on the same audio.
+- **Named system prompts** — keep multiple prompts (one is the default), switch between them in the overlay; switching re-runs the formatting pass on the same audio. Each prompt has a per-prompt **"Answer questions in the first message?"** toggle: off (the default) makes the model format your dictation and stay silent on questions inside it; on lets the first voice message become a chat exchange that you can then continue in the result window.
 - **WYSIWYG Markdown editor** in the overlay — real-time formatting while you edit.
 - **Vocabularies** — teach the app proper spellings of names, products, jargon and their phonetic alt-spellings (so "git hub" gets recognized as "GitHub").
 - **Personal preferences** — free-form context that's injected into every formatting prompt.
