@@ -234,10 +234,10 @@ struct PromptsSettingsTab: View {
                     Image(systemName: "minus")
                 }
                 .buttonStyle(.borderless)
-                // T047: Cannot delete system prompts
+                // FR-009b: read-only prompts (currently simple-voice-to-text) cannot be deleted.
                 .disabled(viewModel.selectedPromptID == nil
                     || viewModel.promptsStore.prompts.count <= 1
-                    || viewModel.selectedPrompt?.isSystem == true)
+                    || viewModel.selectedPrompt?.isReadOnly == true)
 
                 Spacer()
 
@@ -257,12 +257,13 @@ struct PromptsSettingsTab: View {
     @ViewBuilder
     private var promptEditor: some View {
         if viewModel.selectedPromptID != nil {
-            let isSystem = viewModel.selectedPrompt?.isSystem == true
+            // FR-009b: editing/saving/deletion are gated by `isReadOnly`,
+            // which currently matches `simple-voice-to-text` only.
+            let isReadOnly = viewModel.selectedPrompt?.isReadOnly == true
             VStack(alignment: .leading, spacing: 12) {
-                // T048: Disable editing for system prompts
                 TextField(l10n.string("settings.prompts.name"), text: $viewModel.editingPromptName)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(isSystem)
+                    .disabled(isReadOnly)
 
                 Text(l10n.string("settings.prompts.systemPrompt"))
                     .font(.caption)
@@ -272,11 +273,12 @@ struct PromptsSettingsTab: View {
                     .font(.system(.body, design: .monospaced))
                     .frame(maxWidth: .infinity, minHeight: 120, maxHeight: .infinity)
                     .border(Color.secondary.opacity(0.3))
-                    .disabled(isSystem)
+                    .disabled(isReadOnly)
 
-                // T049: voice/text language pickers removed (migrated to global settings in LLMSettingsTab)
+                // 013 (FR-002): per-prompt toggle for first-voice-turn answering.
+                answerInFirstMessageRow(isReadOnly: isReadOnly)
 
-                if !isSystem {
+                if !isReadOnly {
                     HStack {
                         Spacer()
                         Button(l10n.string("settings.prompts.save")) {
@@ -292,6 +294,37 @@ struct PromptsSettingsTab: View {
             Text(l10n.string("settings.prompts.selectPrompt"))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @State private var showAnswerInFirstMessageHelp = false
+
+    @ViewBuilder
+    private func answerInFirstMessageRow(isReadOnly: Bool) -> some View {
+        HStack(alignment: .center, spacing: 6) {
+            Toggle(
+                l10n.string("settings.prompts.answerInFirstMessage.label"),
+                isOn: $viewModel.editingAnswerInFirstMessage
+            )
+            .toggleStyle(.checkbox)
+            .disabled(isReadOnly)
+
+            Button {
+                showAnswerInFirstMessageHelp.toggle()
+            } label: {
+                Image(systemName: "questionmark.circle")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .popover(isPresented: $showAnswerInFirstMessageHelp, arrowEdge: .top) {
+                Text(l10n.string("settings.prompts.answerInFirstMessage.help"))
+                    .font(.callout)
+                    .multilineTextAlignment(.leading)
+                    .padding(12)
+                    .frame(maxWidth: 360, alignment: .leading)
+            }
+
+            Spacer()
         }
     }
 }

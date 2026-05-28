@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - SystemPrompt (T008, T040)
+// MARK: - SystemPrompt (T008, T040, 013-extended)
 
 struct SystemPrompt: Codable, Identifiable, Equatable {
     let id: UUID
@@ -9,6 +9,17 @@ struct SystemPrompt: Codable, Identifiable, Equatable {
     var isDefault: Bool
     var isSystem: Bool
     var systemId: String?
+    /// Controls whether the model is allowed to answer questions that appear inside
+    /// the FIRST voice-transcribed message of a chat session. When `false`, the
+    /// `DoNotAnswerInstruction` is injected into the system prompt for that single turn.
+    /// Has no effect on subsequent chat messages. Default: `false`.
+    var answerQuestionsInFirstMessage: Bool
+
+    /// True for built-in prompts that the user is not allowed to edit or delete via UI.
+    /// Currently only the `simple-voice-to-text` system prompt is read-only.
+    var isReadOnly: Bool {
+        isSystem && systemId == SystemPromptDefinition.simpleVoiceToText.id
+    }
 
     init(
         id: UUID = UUID(),
@@ -16,7 +27,8 @@ struct SystemPrompt: Codable, Identifiable, Equatable {
         content: String,
         isDefault: Bool = false,
         isSystem: Bool = false,
-        systemId: String? = nil
+        systemId: String? = nil,
+        answerQuestionsInFirstMessage: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -24,12 +36,14 @@ struct SystemPrompt: Codable, Identifiable, Equatable {
         self.isDefault = isDefault
         self.isSystem = isSystem
         self.systemId = systemId
+        self.answerQuestionsInFirstMessage = answerQuestionsInFirstMessage
     }
 
-    // MARK: - Codable (backward compatibility with v1 format)
+    // MARK: - Codable (backward compatibility with v1/v2 format)
 
     enum CodingKeys: String, CodingKey {
         case id, name, content, isDefault, isSystem, systemId
+        case answerQuestionsInFirstMessage
         case voiceLanguage, textLanguage // v1 fields — read-only for migration
     }
 
@@ -41,6 +55,10 @@ struct SystemPrompt: Codable, Identifiable, Equatable {
         isDefault = try container.decode(Bool.self, forKey: .isDefault)
         isSystem = try container.decodeIfPresent(Bool.self, forKey: .isSystem) ?? false
         systemId = try container.decodeIfPresent(String.self, forKey: .systemId)
+        answerQuestionsInFirstMessage = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .answerQuestionsInFirstMessage
+        ) ?? false
         // voiceLanguage/textLanguage are intentionally not stored — read via MigrationPrompt
     }
 
@@ -52,7 +70,8 @@ struct SystemPrompt: Codable, Identifiable, Equatable {
         try container.encode(isDefault, forKey: .isDefault)
         try container.encode(isSystem, forKey: .isSystem)
         try container.encodeIfPresent(systemId, forKey: .systemId)
-        // voiceLanguage/textLanguage are NOT written in v2
+        try container.encode(answerQuestionsInFirstMessage, forKey: .answerQuestionsInFirstMessage)
+        // voiceLanguage/textLanguage are NOT written in v2+
     }
 
     /// Returns content localized for the given language (for system prompts),
@@ -75,7 +94,8 @@ struct SystemPrompt: Codable, Identifiable, Equatable {
             content: definition.content(for: language),
             isDefault: true,
             isSystem: true,
-            systemId: "simple-voice-to-text"
+            systemId: definition.id,
+            answerQuestionsInFirstMessage: false
         )
     }
 }

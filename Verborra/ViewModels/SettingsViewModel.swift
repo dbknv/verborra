@@ -30,6 +30,9 @@ final class SettingsViewModel {
     var selectedPromptID: UUID?
     var editingPromptName: String = ""
     var editingPromptContent: String = ""
+    /// 013: Toggle state for the active prompt's `answerQuestionsInFirstMessage`.
+    /// Mirrors the persisted value while the user is editing; saved via `saveCurrentPrompt()`.
+    var editingAnswerInFirstMessage: Bool = false
 
     private let apiKeyValidationService: APIKeyValidationServiceProtocol
     let audioCaptureService: AudioCaptureServiceProtocol
@@ -83,6 +86,7 @@ final class SettingsViewModel {
               let prompt = promptsStore.prompts.first(where: { $0.id == id }) else { return }
         editingPromptName = prompt.name
         editingPromptContent = prompt.content
+        editingAnswerInFirstMessage = prompt.answerQuestionsInFirstMessage
     }
 
     // MARK: - API Key
@@ -129,6 +133,7 @@ final class SettingsViewModel {
         selectedPromptID = prompt.id
         editingPromptName = prompt.name
         editingPromptContent = prompt.content
+        editingAnswerInFirstMessage = prompt.answerQuestionsInFirstMessage
     }
 
     func addPrompt() {
@@ -143,17 +148,18 @@ final class SettingsViewModel {
     func saveCurrentPrompt() {
         guard let id = selectedPromptID,
               var prompt = promptsStore.prompts.first(where: { $0.id == id }) else { return }
-        // T050: System prompts cannot be edited by user
-        guard !prompt.isSystem else { return }
+        // FR-009b: read-only prompts (currently only simple-voice-to-text) cannot be edited.
+        guard !prompt.isReadOnly else { return }
 
         prompt.name = editingPromptName
         prompt.content = editingPromptContent
+        prompt.answerQuestionsInFirstMessage = editingAnswerInFirstMessage
         promptsStore.updatePrompt(prompt)
     }
 
     func deletePrompt(_ id: UUID) {
-        // T050: System prompts cannot be deleted by user
-        if let prompt = promptsStore.prompts.first(where: { $0.id == id }), prompt.isSystem {
+        // FR-009b: read-only prompts cannot be deleted by user.
+        if let prompt = promptsStore.prompts.first(where: { $0.id == id }), prompt.isReadOnly {
             return
         }
         promptsStore.deletePrompt(id)

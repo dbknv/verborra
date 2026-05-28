@@ -12,6 +12,10 @@ final class RecordingViewModel {
     var windowPhase: WindowPhase = .preProcessing
     var inputRecordingState: InputRecordingState = .idle
     var audioLevel: Float = 0.0
+    /// `true` after the first voice-transcribed turn of the current session has been
+    /// dispatched to the LLM. Reset on new session / overlay re-show. Used to gate
+    /// `DoNotAnswerInstruction` injection — applies ONLY to that first turn.
+    private var didConsumeFirstVoiceTurn: Bool = false
     var chatSession: ChatSession?
     var inputText: String = ""
     var copyConfirmation: Bool = false
@@ -272,6 +276,9 @@ final class RecordingViewModel {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let session = chatSession else { return }
 
+        // FR-015: no parallel requests within a single session.
+        if session.lastAssistantMessage?.isStreaming == true { return }
+
         inputText = ""
 
         // Add user message
@@ -284,34 +291,32 @@ final class RecordingViewModel {
 
         Task { @MainActor in
             do {
+                let systemPromptTokens = TokenEstimator.estimateTokens(
+                    selectedPrompt.contentForLanguage(selectedTextLanguage)
+                )
                 let budget = TokenEstimator.messageBudget(
                     for: settings.selectedLLMModel,
-                    systemPromptTokens: TokenEstimator.estimateTokens(
-                        selectedPrompt.contentForLanguage(selectedTextLanguage)
-                    )
+                    systemPromptTokens: systemPromptTokens
                 )
+                // FR-004 / FR-005 / FR-006 / FR-007 / FR-008:
+                // continuation always sends full session history through prepareMessagesForLLM.
+                // `isFirstVoiceTurn` is false here — this is a chat-input message, not voice.
                 let messagesForAPI = session.prepareMessagesForLLM(
                     maxTokenBudget: budget,
-                    systemPromptTokens: TokenEstimator.estimateTokens(
-                        selectedPrompt.contentForLanguage(selectedTextLanguage)
-                    )
+                    systemPromptTokens: systemPromptTokens,
+                    isFirstVoiceTurn: false,
+                    answerQuestionsInFirstMessage: selectedPrompt.answerQuestionsInFirstMessage
                 )
 
-                if let streaming = streamingService {
-                    let stream = streaming.streamChat(messages: messagesForAPI, model: settings.selectedLLMModel)
-                    var accumulated = ""
-                    for try await token in stream {
-                        accumulated += token
-                        session.updateLastAssistantContent(accumulated)
-                    }
-                } else {
-                    let formattedText = try await formattingService.format(
-                        text: text,
-                        systemPrompt: selectedPrompt.contentForLanguage(selectedTextLanguage),
-                        textLanguage: selectedTextLanguage,
-                        model: settings.selectedLLMModel
-                    )
-                    session.updateLastAssistantContent(formattedText)
+                guard let streaming = streamingService else {
+                    throw RecordingError.formattingFailed("Streaming service unavailable")
+                }
+
+                let stream = streaming.streamChat(messages: messagesForAPI, model: settings.selectedLLMModel)
+                var accumulated = ""
+                for try await token in stream {
+                    accumulated += token
+                    session.updateLastAssistantContent(accumulated)
                 }
 
                 assistantMessage.isStreaming = false
@@ -478,6 +483,8 @@ final class RecordingViewModel {
             textLanguage: selectedTextLanguage,
             audioDevice: selectedAudioDeviceID
         )
+        // FR-013: every new session restarts the first-voice-turn gate.
+        didConsumeFirstVoiceTurn = false
 
         targetAppTracker.startTracking()
 
@@ -593,11 +600,25 @@ final class RecordingViewModel {
                 let assistantMessage = ChatMessage(role: .assistant, content: "", isStreaming: true)
                 chatSession?.addMessage(assistantMessage)
 
+                // FR-003 / FR-003a / FR-004: only the FIRST voice turn of the session
+                // can receive the do-not-answer injection. Capture the flag value
+                // before the await so the consumption is atomic with respect to
+                // subsequent voice recordings in this session.
+                let isFirstVoiceTurn = !didConsumeFirstVoiceTurn
+                let basePromptForFirstTurn: String = {
+                    let base = selectedPrompt.contentForLanguage(selectedTextLanguage)
+                    if isFirstVoiceTurn && !selectedPrompt.answerQuestionsInFirstMessage {
+                        return base + "\n\n" + DoNotAnswerInstruction.text(for: selectedVoiceLanguage)
+                    }
+                    return base
+                }()
+                didConsumeFirstVoiceTurn = true
+
                 if let streaming = streamingService {
                     do {
                         let stream = streaming.streamFormat(
                             text: rawText,
-                            systemPrompt: selectedPrompt.contentForLanguage(selectedTextLanguage),
+                            systemPrompt: basePromptForFirstTurn,
                             textLanguage: selectedTextLanguage,
                             model: settings.selectedLLMModel,
                             vocabularyEntries: vocabularyStore.entries,
@@ -612,7 +633,7 @@ final class RecordingViewModel {
                         // Fallback to non-streaming on SSE error
                         let formattedText = try await formattingService.format(
                             text: rawText,
-                            systemPrompt: selectedPrompt.contentForLanguage(selectedTextLanguage),
+                            systemPrompt: basePromptForFirstTurn,
                             textLanguage: selectedTextLanguage,
                             model: settings.selectedLLMModel,
                             vocabularyEntries: vocabularyStore.entries,
@@ -625,12 +646,12 @@ final class RecordingViewModel {
                     if let router = processingRouter {
                         formattedText = try await router.process(
                             text: rawText,
-                            systemPrompt: selectedPrompt.contentForLanguage(selectedTextLanguage)
+                            systemPrompt: basePromptForFirstTurn
                         )
                     } else {
                         formattedText = try await formattingService.format(
                             text: rawText,
-                            systemPrompt: selectedPrompt.contentForLanguage(selectedTextLanguage),
+                            systemPrompt: basePromptForFirstTurn,
                             textLanguage: selectedTextLanguage,
                             model: settings.selectedLLMModel
                         )

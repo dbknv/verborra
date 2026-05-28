@@ -9,7 +9,7 @@ final class PromptsStore {
     private let log = DiagnosticLogger.logger(for: .settings)
 
     private static let dataVersionKey = "promptsDataVersion"
-    private static let currentDataVersion = 2
+    private static let currentDataVersion = 3
 
     var defaultPrompt: SystemPrompt {
         prompts.first(where: { $0.isDefault }) ?? prompts.first ?? SystemPrompt.makeDefault()
@@ -43,47 +43,70 @@ final class PromptsStore {
         }
     }
 
-    // MARK: - Migration v1 → v2 (T042)
+    // MARK: - Migration v1 → v2 → v3 (T042, 013-FR-009a/FR-009b)
 
     private func migrateIfNeeded() {
         let version = UserDefaults.standard.integer(forKey: Self.dataVersionKey)
         guard version < Self.currentDataVersion else { return }
 
-        // Read v1 data with voiceLanguage/textLanguage using MigrationPrompt
-        var migrationPrompts: [MigrationPrompt] = []
-        if FileManager.default.fileExists(atPath: fileURL.path),
-           let data = try? Data(contentsOf: fileURL) {
-            migrationPrompts = (try? JSONDecoder().decode([MigrationPrompt].self, from: data)) ?? []
+        // ---- v1 → v2: extract per-prompt languages into global settings, mark default as system prompt.
+        if version < 2 {
+            // Read v1 data with voiceLanguage/textLanguage using MigrationPrompt
+            var migrationPrompts: [MigrationPrompt] = []
+            if FileManager.default.fileExists(atPath: fileURL.path),
+               let data = try? Data(contentsOf: fileURL) {
+                migrationPrompts = (try? JSONDecoder().decode([MigrationPrompt].self, from: data)) ?? []
+            }
+
+            // Migrate voice/text language from default prompt to global settings.
+            if let defaultMigration = migrationPrompts.first(where: { $0.isDefault }) ?? migrationPrompts.first {
+                if let voiceLang = defaultMigration.voiceLanguage, !voiceLang.isEmpty {
+                    UserDefaults.standard.set(voiceLang, forKey: "globalVoiceLanguage")
+                }
+                if let textLang = defaultMigration.textLanguage, !textLang.isEmpty {
+                    UserDefaults.standard.set(textLang, forKey: "globalTextLanguage")
+                }
+            }
+
+            // Replace "Стандартный" (or first prompt) with the simple-voice-to-text system prompt.
+            let language = LocalizationManager.shared.currentLanguage
+            let definition = SystemPromptDefinition.simpleVoiceToText
+
+            let targetIndex = prompts.firstIndex(where: { $0.name == "Стандартный" })
+                ?? prompts.firstIndex(where: { $0.isDefault })
+                ?? (prompts.isEmpty ? nil : 0)
+
+            if let idx = targetIndex {
+                let wasDefault = prompts[idx].isDefault
+                prompts[idx] = SystemPrompt(
+                    id: prompts[idx].id,
+                    name: definition.name(for: language),
+                    content: definition.content(for: language),
+                    isDefault: wasDefault,
+                    isSystem: true,
+                    systemId: definition.id,
+                    answerQuestionsInFirstMessage: false
+                )
+            }
         }
 
-        // Step 1: Migrate voice/text language from default prompt to global settings
-        if let defaultMigration = migrationPrompts.first(where: { $0.isDefault }) ?? migrationPrompts.first {
-            if let voiceLang = defaultMigration.voiceLanguage, !voiceLang.isEmpty {
-                UserDefaults.standard.set(voiceLang, forKey: "globalVoiceLanguage")
+        // ---- v2 → v3: FR-009a force-rewrite simple-voice-to-text content/name
+        // to the new simplified formulation in the user's current locale, and reset
+        // the read-only prompt's `answerQuestionsInFirstMessage` to `false`.
+        // Any previous user customizations of this built-in prompt are discarded.
+        if version < 3 {
+            let language = LocalizationManager.shared.currentLanguage
+            let definition = SystemPromptDefinition.simpleVoiceToText
+            if let idx = prompts.firstIndex(where: { $0.isSystem && $0.systemId == definition.id }) {
+                let previousLength = prompts[idx].content.count
+                prompts[idx].name = definition.name(for: language)
+                prompts[idx].content = definition.content(for: language)
+                prompts[idx].answerQuestionsInFirstMessage = false
+                log.info("Migrated simple-voice-to-text content to v3", metadata: [
+                    "language": language.rawValue,
+                    "previousContentLength": "\(previousLength)"
+                ])
             }
-            if let textLang = defaultMigration.textLanguage, !textLang.isEmpty {
-                UserDefaults.standard.set(textLang, forKey: "globalTextLanguage")
-            }
-        }
-
-        // Step 2: Replace "Стандартный" (or first prompt) with system prompt
-        let language = LocalizationManager.shared.currentLanguage
-        let definition = SystemPromptDefinition.simpleVoiceToText
-
-        let targetIndex = prompts.firstIndex(where: { $0.name == "Стандартный" })
-            ?? prompts.firstIndex(where: { $0.isDefault })
-            ?? (prompts.isEmpty ? nil : 0)
-
-        if let idx = targetIndex {
-            let wasDefault = prompts[idx].isDefault
-            prompts[idx] = SystemPrompt(
-                id: prompts[idx].id,
-                name: definition.name(for: language),
-                content: definition.content(for: language),
-                isDefault: wasDefault,
-                isSystem: true,
-                systemId: "simple-voice-to-text"
-            )
         }
 
         UserDefaults.standard.set(Self.currentDataVersion, forKey: Self.dataVersionKey)
@@ -135,8 +158,8 @@ final class PromptsStore {
 
     func updatePrompt(_ prompt: SystemPrompt) {
         guard let index = prompts.firstIndex(where: { $0.id == prompt.id }) else { return }
-        // T046: Protect system prompts from user modification
-        guard !prompts[index].isSystem else { return }
+        // FR-009b: read-only prompts (currently simple-voice-to-text) cannot be modified.
+        guard !prompts[index].isReadOnly else { return }
         var updated = prompt
         if updated.isDefault {
             clearDefaults()
@@ -147,8 +170,8 @@ final class PromptsStore {
     }
 
     func deletePrompt(_ id: UUID) {
-        // T046: Protect system prompts from deletion
-        guard let prompt = prompts.first(where: { $0.id == id }), !prompt.isSystem else { return }
+        // FR-009b: read-only prompts cannot be deleted.
+        guard let prompt = prompts.first(where: { $0.id == id }), !prompt.isReadOnly else { return }
 
         let wasDefault = prompt.isDefault
         prompts.removeAll { $0.id == id }
