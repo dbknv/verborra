@@ -1,147 +1,147 @@
-# Quickstart: проверка фичи 013 локально
+# Quickstart: validating feature 013 locally
 
-**Дата**: 2026-05-27
-**Цель**: за 10 минут самостоятельно убедиться, что 5 ключевых сценариев фичи работают на локально собранной версии.
+**Date**: 2026-05-27
+**Goal**: in ~10 minutes, confirm that the feature's 5 key scenarios work on a locally built version.
 
-Этот документ — руководство **для тестировщика/разработчика**, не для конечного пользователя. Он описывает практическую проверку, дополняющую формальный `/speckit.verify`.
+This document is a guide **for the tester / developer**, not the end user. It describes hands-on validation complementing the formal `/speckit.verify`.
 
 ---
 
-## Подготовка
+## Setup
 
-1. Сборка фичеветки:
+1. Build the feature branch:
    ```bash
    git checkout 013-dictation-flow-rework
    xcodebuild -project Verborra.xcodeproj -scheme Verborra -configuration Debug build
    ```
-2. Запуск приложения из Xcode (Cmd+R) или через `open builds/Verborra.app`.
-3. В Settings → API убедиться, что ключ OpenAI сохранён в Keychain.
-4. В Settings → System Prompts проверить, что присутствует встроенный `Simple Voice To Text` / `Речь в текст` (в зависимости от языка интерфейса).
-5. Убедиться, что у пользователя выбран дефолтный промпт `Simple Voice To Text`.
+2. Launch the app from Xcode (Cmd+R) or via `open builds/Verborra.app`.
+3. In Settings → API, confirm the OpenAI key is stored in the Keychain.
+4. In Settings → System Prompts, confirm the built-in `Simple Voice To Text` / `Речь в текст` (depending on UI language) is present.
+5. Make sure the user has the `Simple Voice To Text` default prompt selected.
 
 ---
 
-## Сценарий 1 (US1): диктовка без ответа на вопросы
+## Scenario 1 (US1): dictation without answering questions
 
-**Шаги**:
+**Steps**:
 
-1. Открыть Settings → System Prompts.
-2. Выбрать дефолтный `Simple Voice To Text`. **Ожидание**: чекбокс «Отвечать на вопросы в первом сообщении?» отображается в **disabled** состоянии и **выключен**. Поля name/content для этого промпта тоже disabled.
-3. Закрыть Settings.
-4. Активировать запись через глобальный хоткей.
-5. Сказать: «Послушай а как ты думаешь успеем ли мы к пятнице?»
-6. Остановить запись.
+1. Open Settings → System Prompts.
+2. Select the default `Simple Voice To Text`. **Expected**: the "Answer questions in the first message?" checkbox is shown **disabled** and **unchecked**. The name/content fields for this prompt are also disabled.
+3. Close Settings.
+4. Trigger recording via the global hotkey.
+5. Say: "Hey what do you think will we make it by Friday?"
+6. Stop the recording.
 
-**Ожидание**:
+**Expected**:
 
-- В окне результата отображается отформатированная транскрипция вида: «Послушай, а как ты думаешь, успеем ли мы к пятнице?»
-- **НЕТ** ответа модели после транскрипции.
-- **НЕТ** встречных уточнений.
+- The result window shows a formatted transcription like: "Hey, what do you think — will we make it by Friday?"
+- **NO** model answer follows the transcription.
+- **NO** clarifying back-and-forth.
 
-**Если падает**: проверить, что чекбокс действительно `false` для выбранного промпта; включена ли инжекция через диагностический лог (`Console.app`, фильтр subsystem `Verborra`, уровень INFO — должна быть запись `prepareMessagesForLLM done | injectedDoNotAnswer=true`).
-
----
-
-## Сценарий 2 (US2): диктовка с ответом и продолжение диалога
-
-**Шаги**:
-
-1. Открыть Settings → System Prompts → создать новый пользовательский промпт «Q&A» с content `"Отвечай развёрнуто на пользовательский вопрос."` Установить ему чекбокс «Отвечать на вопросы в первом сообщении?» в **включено**.
-2. Сделать «Q&A» дефолтным.
-3. Закрыть Settings.
-4. Активировать запись, сказать: «Объясни, как работает SwiftUI Observable».
-5. Получить ответ модели в окне результата.
-6. В поле текстового ввода окна результата напечатать: «А подробнее про второй пункт?»
-7. Нажать Send.
-
-**Ожидание**:
-
-- После шага 5 модель даёт содержательный ответ.
-- После шага 7 модель отвечает с учётом контекста (упоминает «второй пункт» из своего предыдущего ответа). Это подтверждает, что отправляется вся история сессии.
-
-**Если падает**: проверить через Console.app DEBUG-лог `prepareMessagesForLLM` — `messageCount` должен быть ≥3 (system + user₁ + assistant₁ + user₂). Если только 2 — значит не сработала унификация streaming/non-streaming пути (см. plan.md R-006).
+**If it fails**: verify that the checkbox is actually `false` for the selected prompt; check the diagnostic log (`Console.app`, filter subsystem `Verborra`, INFO level — there should be a `prepareMessagesForLLM done | injectedDoNotAnswer=true` record).
 
 ---
 
-## Сценарий 3 (US3 — баг-фикс): полная история чата
+## Scenario 2 (US2): dictation with an answer and continued dialogue
 
-**Шаги**:
+**Steps**:
 
-1. В окне результата (любая сессия с включённым чекбоксом или с пользовательским промптом, где модель отвечает): надиктовать «Запомни число 42».
-2. Получить ответ.
-3. В текстовом инпуте: «Какое число я просил запомнить?»
+1. Open Settings → System Prompts → create a new user prompt "Q&A" with content `"Answer the user's question in full."` Set its "Answer questions in the first message?" checkbox to **on**.
+2. Make "Q&A" the default.
+3. Close Settings.
+4. Trigger recording, say: "Explain how SwiftUI Observable works."
+5. Receive the model's answer in the result window.
+6. In the text input at the bottom of the result window, type: "Can you go deeper on the second point?"
+7. Press Send.
+
+**Expected**:
+
+- After step 5 the model provides a substantive answer.
+- After step 7 the model answers with context (it mentions the "second point" from its previous reply). This confirms the full session history is being sent.
+
+**If it fails**: check Console.app DEBUG log `prepareMessagesForLLM` — `messageCount` should be ≥3 (system + user₁ + assistant₁ + user₂). If it's only 2 — the streaming/non-streaming unification didn't take (see plan.md R-006).
+
+---
+
+## Scenario 3 (US3 — bug fix): full chat history
+
+**Steps**:
+
+1. In the result window (any session with the checkbox on or with a user prompt where the model does answer): dictate "Remember the number 42."
+2. Receive the response.
+3. In the text input: "What number did I ask you to remember?"
 4. Send.
 
-**Ожидание**: модель отвечает «42».
+**Expected**: the model answers "42."
 
-**Регресс-чек на main**: на ветке `main` (без фичи) — модель в шаге 4 отвечает «не знаю / переспрашивает», что подтверждает наличие бага.
+**Regression check against `main`**: on the `main` branch (without the feature) the model in step 4 responds "I don't know" / asks for clarification, confirming the bug exists there.
 
 ---
 
-## Сценарий 4 (US3 — edited messages): редактирование сообщения
+## Scenario 4 (US3 — edited messages): message editing
 
-**Шаги**:
+**Steps**:
 
-1. В окне результата с активным диалогом (как в Сценарии 3): после шага 2 — нажать «Edit» (или вызвать существующий UI редактирования) на первом user-сообщении.
-2. Поменять «42» на «99», подтвердить правку.
-3. В текстовом инпуте: «Какое число я просил запомнить?»
+1. In a result window with an active dialogue (as in Scenario 3): after step 2 click "Edit" (or trigger the existing edit UI) on the first user message.
+2. Change "42" to "99" and confirm the edit.
+3. In the text input: "What number did I ask you to remember?"
 4. Send.
 
-**Ожидание**: модель отвечает «99» (а не 42).
+**Expected**: the model answers "99" (not 42).
 
-**Если падает**: значит, `prepareMessagesForLLM` берёт устаревший текст сообщения. Проверить через Console.app DEBUG-лог `prepareMessagesForLLM` — там должно быть видно отредактированное содержимое (на `privacy: .private` — открыть как разработчик можно через `log stream --info`).
-
----
-
-## Сценарий 5 (US3 — pair truncation): переполнение лимита
-
-**Шаги**:
-
-1. В окне результата провести искусственно длинный диалог (например, 20+ обменов с длинными ответами), чтобы суммарный размер превышал бюджет токенов выбранной модели (`gpt-4.1-nano` имеет относительно небольшой бюджет — это удобно).
-2. Отправить очередное сообщение.
-
-**Ожидание**:
-
-- Запрос не падает с ошибкой превышения контекста.
-- В Console.app INFO-лог `prepareMessagesForLLM done | droppedPairs=N` показывает, что N>0 пар было отброшено.
-- В DEBUG-логе видно, что отброшены именно самые ранние сообщения (по timestamp/индексу).
-- Системный промпт и последнее user-сообщение присутствуют в payload.
+**If it fails**: that means `prepareMessagesForLLM` is reading a stale message text. Check the Console.app DEBUG log for `prepareMessagesForLLM` — the edited content must be visible there (under `privacy: .private`, so as a developer use `log stream --info`).
 
 ---
 
-## Сценарий 6 (FR-015): блокировка во время стрима
+## Scenario 5 (US3 — pair truncation): budget overflow
 
-**Шаги**:
+**Steps**:
 
-1. В окне результата отправить длинное сообщение (или попросить «напиши очень длинный текст»).
-2. Пока assistant-ответ стримится — попробовать:
-   - Ввести текст в input и нажать Send;
-   - Нажать кнопку повторной голосовой записи.
+1. In the result window, drive an artificially long dialogue (e.g. 20+ exchanges with long answers) so the total exceeds the chosen model's token budget (`gpt-4.1-nano` has a relatively small budget — convenient).
+2. Send another message.
 
-**Ожидание**: обе кнопки в disabled-состоянии. Никаких параллельных запросов не отправляется.
+**Expected**:
 
----
-
-## Сценарий 7 (FR-009/FR-009a/FR-009b): миграция и read-only
-
-**Шаги**:
-
-1. Сначала установить **старую** версию приложения (с main). Открыть Settings → System Prompts → отредактировать `Simple Voice To Text`, заменить content на любой текст (например, «test-content»).
-2. Сохранить и закрыть приложение.
-3. Установить **новую** версию (ветка 013). Открыть приложение.
-4. Открыть Settings → System Prompts → выбрать `Simple Voice To Text`.
-
-**Ожидание**:
-
-- Content промпта **сброшен** на новую упрощённую формулировку «Исправь орфографические ошибки и расставь знаки препинания. Верни только исправленный текст.» (или его английский эквивалент в зависимости от текущей локали интерфейса). Пользовательская правка «test-content» **затёрта**.
-- Поля name/content/Toggle отображаются в disabled-состоянии (read-only).
-- Кнопка Delete для этого промпта скрыта или disabled.
-
-В Console.app должна быть запись `Migrated simple-voice-to-text content | language=ru | previousContentHash=...`.
+- The request does not fail with a context-overflow error.
+- The Console.app INFO log `prepareMessagesForLLM done | droppedPairs=N` shows N>0 pairs were dropped.
+- The DEBUG log confirms the earliest messages are the ones dropped (by timestamp/index).
+- The system prompt and the latest user message are present in the payload.
 
 ---
 
-## Сводная проверка через тесты
+## Scenario 6 (FR-015): blocking during streaming
+
+**Steps**:
+
+1. In the result window send a long message (or ask for "write a very long text").
+2. While the assistant's reply is still streaming, try:
+   - Typing in the input and pressing Send;
+   - Pressing the re-record voice button.
+
+**Expected**: both buttons are in their disabled state. No parallel requests are issued.
+
+---
+
+## Scenario 7 (FR-009/FR-009a/FR-009b): migration and read-only
+
+**Steps**:
+
+1. First install the **old** version of the app (from `main`). Open Settings → System Prompts → edit `Simple Voice To Text`, replacing the content with anything (e.g. "test-content").
+2. Save and quit the app.
+3. Install the **new** version (branch 013). Launch the app.
+4. Open Settings → System Prompts → select `Simple Voice To Text`.
+
+**Expected**:
+
+- The prompt content is **reset** to the new simplified phrasing "Fix spelling errors and add punctuation. Return only the corrected text." (or its equivalent in the current UI locale). The user edit "test-content" is **wiped**.
+- The name/content/Toggle fields are shown disabled (read-only).
+- The Delete button for this prompt is hidden or disabled.
+
+The Console.app log should contain `Migrated simple-voice-to-text content | language=ru | previousContentHash=...`.
+
+---
+
+## Aggregate test check
 
 ```bash
 xcodebuild test -project Verborra.xcodeproj -scheme Verborra \
@@ -150,18 +150,18 @@ xcodebuild test -project Verborra.xcodeproj -scheme Verborra \
   -only-testing:VerborraTests/PromptsStoreTests
 ```
 
-**Ожидание**: все тесты зелёные. В отчёте `xcodebuild` нет failed-кейсов с префиксом `test_FR_*` или `test_SC_*`.
+**Expected**: all tests green. The `xcodebuild` report contains no failed cases prefixed `test_FR_*` or `test_SC_*`.
 
 ---
 
-## Откат (если нужно)
+## Rollback (if needed)
 
 1. `git checkout main`.
-2. Удалить `~/Library/Application Support/Verborra/system_prompts.json` (бэкап положить рядом) — или просто оставить, старая версия его прочитает и сохранит с `dataVersion = 2`. Контент `simple-voice-to-text` будет показан как обычный текст (тот, что мигрировался).
+2. Delete `~/Library/Application Support/Verborra/system_prompts.json` (keep a backup nearby) — or just leave it: the old version will read it and save it back with `dataVersion = 2`. The `simple-voice-to-text` content will be shown as the (already migrated) plain text.
 
 ---
 
-## Где смотреть логи
+## Where to look for logs
 
-- **Console.app**: фильтр по subsystem `verborra` или process `Verborra`. Уровень `INFO` для основных событий; для DEBUG-payload — переключить уровень в Verborra → Settings → Advanced → Logging Level.
-- **Файлы**: `~/Library/Application Support/Verborra/Logs/*.jsonl` (часовая ротация, 24-часовое хранение).
+- **Console.app**: filter by subsystem `verborra` or process `Verborra`. INFO level for the main events; for DEBUG-level payloads switch the level in Verborra → Settings → Advanced → Logging Level.
+- **Files**: `~/Library/Application Support/Verborra/Logs/*.jsonl` (hourly rotation, 24-hour retention).

@@ -22,7 +22,7 @@ $ARGUMENTS
 
 ## Language
 
-All **produced project documentation** (new files you create or updates you write into markdown docs) MUST be written in **Russian**.
+All **produced project documentation** (new files you create or updates you write into markdown docs) MUST be written in **English**.
 
 Source operational artifacts MUST remain in English:
 

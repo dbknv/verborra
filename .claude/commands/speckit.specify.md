@@ -20,16 +20,16 @@ You **MUST** consider the user input before proceeding (if not empty).
 
 ## Language
 
-All **produced project documentation** (new files you create or updates you write into markdown docs) MUST be written in **Russian**.
+All **produced project documentation** (new files you create or updates you write into markdown docs) MUST be written in **English**.
 
 Source operational artifacts MUST remain in English:
 - Commands (`.claude/commands/**`)
 - Memory (`.specify/memory/**`)
 - Document templates (`.specify/templates/**`)
 
-Use these English sources as inputs, but when generating the actual output documents, write them in Russian.
+Use these English sources as inputs, but when generating the actual output documents, write them in English.
 
-Target specs MUST be translates to Russian:
+Target specs MUST be written in English:
 - Constitution (`.specify/memory/constitution.md`)
 - Output specs (`specs/**`)
 

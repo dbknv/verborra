@@ -20,7 +20,7 @@ $ARGUMENTS
 
 ## Language
 
-All **produced project documentation** MUST be written in **Russian**.
+All **produced project documentation** MUST be written in **English**.
 Source operational artifacts (commands, templates) MUST remain in English.
 
 ## Prerequisites

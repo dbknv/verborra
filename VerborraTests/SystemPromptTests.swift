@@ -212,6 +212,21 @@ final class DoNotAnswerInstructionTests: XCTestCase {
 
     func testRussianText_containsAnswerNegation() {
         let ru = DoNotAnswerInstruction.text(for: .ru)
-        XCTAssertTrue(ru.contains("Не отвечай") || ru.contains("не отвечай"), "RU instruction must explicitly negate answering")
+        // Stronger wording after T+8: "НЕ ДОЛЖЕН отвечать" + concrete example/counter-example.
+        XCTAssertTrue(
+            ru.lowercased().contains("не должен отвечать") || ru.lowercased().contains("не отвечай"),
+            "RU instruction must explicitly negate answering"
+        )
+        XCTAssertTrue(
+            ru.contains("Пример"),
+            "RU instruction must include a concrete example for small-model grounding"
+        )
+    }
+
+    /// English text must contain the same example structure.
+    func testEnglishText_containsExample() {
+        let en = DoNotAnswerInstruction.text(for: .en)
+        XCTAssertTrue(en.contains("Example input"), "EN instruction must include a concrete example for small-model grounding")
+        XCTAssertTrue(en.lowercased().contains("must not answer"), "EN instruction must explicitly forbid answering")
     }
 }

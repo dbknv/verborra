@@ -1,74 +1,82 @@
-# Phase 0 Research: Переработка flow диктовки (v0.13)
+# Phase 0 Research: Dictation Flow Rework (v0.13)
 
-**Дата**: 2026-05-27
-**Источник**: [spec.md](spec.md), `## Clarifications` (5 вопросов разрешены)
+**Date**: 2026-05-27
+**Source**: [spec.md](spec.md), `## Clarifications` (5 questions resolved)
 
-Все [NEEDS CLARIFICATION] из спецификации уже зафиксированы на этапе `/speckit.clarify`. В этом документе фиксируются прикладные технические решения, выбранные на основе изучения исходников приложения.
-
----
-
-## R-001: Где хранить `answerQuestionsInFirstMessage`
-
-- **Decision**: Расширить существующую структуру `SystemPrompt` (в `Verborra/Models/SystemPrompt.swift`) булевым полем `answerQuestionsInFirstMessage` со значением по умолчанию `false`. Поле сериализуется через `Codable` в том же JSON-файле `~/Library/Application Support/Verborra/system_prompts.json`, который уже использует `PromptsStore`.
-- **Rationale**: 
-  - Промпт — единственное место в системе, где сохраняется per-prompt поведенческая настройка. Хранить отдельно (UserDefaults, новый JSON) — нарушит инвариант «вся конфигурация промпта — в одном объекте», который уже выдержан в проекте.
-  - Существующий `PromptsStore` поддерживает миграцию (`currentDataVersion`), что позволяет без потерь обновить схему.
-  - Дефолт `false` зафиксирован в Q-Clarification: «выключено для всех промптов».
-- **Alternatives considered**:
-  - Хранить в UserDefaults (одна общая настройка) — отверг: ломает per-prompt семантику; пользователь не сможет настроить разные промпты по-разному.
-  - Хранить в отдельной таблице/файле — отверг: лишняя сущность, нарушает Principle 3 (минимализм).
-  - Зашить в системные промпты как часть `content` — отверг: тогда настройка не управляема пользователем для пользовательских промптов.
+All `[NEEDS CLARIFICATION]` markers from the specification were resolved at the `/speckit.clarify` stage. This document records the applied technical decisions made by reviewing the app's source.
 
 ---
 
-## R-002: Как сигнализировать LLM «не отвечать на вопросы»
+## R-001: Where to store `answerQuestionsInFirstMessage`
 
-- **Decision**: Текстовая инжекция дополнительной инструкции в system message. При формировании запроса в `ChatSession.prepareMessagesForLLM` к содержимому системного промпта добавляется блок (отделённый `\n\n`) с локализованной инструкцией «не отвечать на вопросы, не уточнять, только вернуть отформатированный текст». Условие применения — `isFirstVoiceTurn == true && answerQuestionsInFirstMessage == false`. Текст инструкции локализуется по `voiceLanguage` (5-й clarification).
+- **Decision**: Extend the existing `SystemPrompt` struct (in `Verborra/Models/SystemPrompt.swift`) with a boolean `answerQuestionsInFirstMessage`, default `false`. The field is serialized through `Codable` in the same JSON file `~/Library/Application Support/Verborra/system_prompts.json` already used by `PromptsStore`.
 - **Rationale**:
-  - OpenAI Chat Completions API не имеет специального структурированного флага «не отвечать». Единственный механизм — текстовые инструкции в system role.
-  - Не требует изменения URL/headers/payload-формата. Изменение касается только содержимого `system`-сообщения.
-  - Локализация согласуется с уже существующим механизмом `contentForLanguage(voiceLanguage)`, и не создаёт смешения языков в одном system message.
+  - A prompt is the only place in the system that persists per-prompt behavioral configuration. Storing it elsewhere (UserDefaults, a new JSON) would break the "everything for a prompt lives in one object" invariant already followed in the project.
+  - The existing `PromptsStore` supports migrations (`currentDataVersion`), allowing schema updates without data loss.
+  - The `false` default is fixed by the Q-Clarification: "off for every prompt."
 - **Alternatives considered**:
-  - Инжектировать инструкцию в user-сообщение перед текстом транскрипции — отверг: загрязняет user-content; в логах сложнее отслеживать.
-  - Использовать `function_calling` или `response_format=json_schema` — отверг: слишком тяжёлая артиллерия для простого ограничения поведения; добавляет risk-of-format-mismatch.
-  - Делать второй проход «отбрасывания ответа» через локальный пост-фильтр — отверг: ненадёжно, нельзя гарантировать корректность парсинга «вопрос/ответ» из текста.
+  - Storing in UserDefaults (a single global setting) — rejected: breaks per-prompt semantics; the user couldn't tailor different prompts differently.
+  - A separate table/file — rejected: unnecessary entity, violates Principle 3 (minimalism).
+  - Encoded into the system prompts' `content` itself — rejected: then the setting wouldn't be user-manageable for user prompts.
 
 ---
 
-## R-003: Где определяется «первое голосовое сообщение сессии»
+## R-002: How to signal the LLM "do not answer questions"
 
-- **Decision**: В `RecordingViewModel` ввести приватный флаг `private var didConsumeFirstVoiceTurn: Bool = false`. Флаг сбрасывается в `false` в момент создания новой `ChatSession` (методы `startRecording`/`reset`) и устанавливается в `true` сразу после успешной отправки первого голосового запроса в LLM. `ChatSession.prepareMessagesForLLM` получает новый параметр `isFirstVoiceTurn: Bool`, который ViewModel вычисляет как `!didConsumeFirstVoiceTurn && isVoiceInitiated`.
+- **Decision**: Inject the supplementary instruction as plain text **at the very end** of the final system message (after `PromptEnhancer`). For the first voice turn (`isFirstVoiceTurn == true && answerQuestionsInFirstMessage == false`), `RecordingViewModel.stopRecording` builds the system content manually:
+  1. base prompt = `selectedPrompt.contentForLanguage(textLanguage)`
+  2. `PromptEnhancer.enhance(...)` adds Response Language / Personal Preferences / Vocabulary sections
+  3. the `## Critical Instruction` heading + the localized `DoNotAnswerInstruction.text(for: voiceLanguage)` is appended at the end
+  4. the resulting prompt + transcription are sent through `streamingService.streamChat(messages:model:)` (NOT `streamFormat`, to avoid invoking `PromptEnhancer` twice).
 - **Rationale**:
-  - Семантика «первое голосовое» относится к жизненному циклу сессии, а это ответственность ViewModel.
-  - Не хранится в самой `ChatSession`, потому что `ChatSession` не знает, как сообщение появилось (через voice или через text input в чате).
-  - Сброс на reset/recreate — естественно следует из реинициализации ViewModel и пересоздания `ChatSession`.
+  - The OpenAI Chat Completions API has no structured "do not answer" flag. The only mechanism is a text instruction in the system role.
+  - **End placement** is critical for small models (`gpt-4.1-nano`): empirically confirmed by a log where an instruction placed in the middle of the payload was ignored. The PromptEnhancer sections use "MUST" phrasing that outweighs a soft "do not answer" placed earlier.
+  - **Wording** includes (see FR-003c): a priority marker ("CRITICAL INSTRUCTION — overrides any instruction above"), explicit "MUST NOT" prohibitions, and **a concrete example + counter-example**. The example (input: "how much is two plus two", correct output: "How much is two plus two?", wrong: "4") materially improves instruction-following on small models.
+  - Does not require any URL/headers/payload format change.
+  - Localization mirrors `contentForLanguage(voiceLanguage)`, so the system message never mixes languages.
 - **Alternatives considered**:
-  - Хранить флаг в `ChatSession` — отверг: смешивает источник сообщения (voice/text) с содержимым.
-  - Определять по типу первого сообщения в `messages` (`role == .transcription`) — отверг: транскрипционные сообщения отсутствуют как отдельная роль для второй и более голосовой записи, и в коде роль `.transcription` уже маппится в `user` для API-запроса; этот сигнал ненадёжен.
+  - Injecting BEFORE the PromptEnhancer sections (the first implementation iteration) — rejected: the model ignored it, confirmed by the log `verborra-2026-05-28T12.jsonl` (the model answered "6×3=88" while the checkbox was off).
+  - Using only the bare wording without an example — rejected: the same logs showed this insufficient for `gpt-4.1-nano`.
+  - Injecting the instruction into the user message in front of the transcription — rejected: contaminates user content and is harder to trace in logs.
+  - Using `function_calling` or `response_format=json_schema` — rejected: too heavy for a simple behavior gate; introduces format-mismatch risk.
+  - A second pass that strips the answer via a local post-filter — rejected: unreliable; parsing "question/answer" from text cannot be guaranteed.
 
 ---
 
-## R-004: Усечение истории парами `user/assistant`
+## R-003: Where the "first voice message of the session" lives
 
-- **Decision**: Перерабатывается алгоритм в `ChatSession.prepareMessagesForLLM`:
-  1. Системный промпт всегда первый, всегда сохраняется.
-  2. Последнее `user`-сообщение всегда сохраняется.
-  3. Перебирая `messages` с конца, накапливаем сообщения в буфер `selected` (в обратном порядке) до тех пор, пока `totalTokens + nextMessage.tokens <= availableBudget`.
-  4. Если очередное сообщение не помещается — отбрасываем сразу пару: текущее старое + соседнее (обычно `assistant`, парный к user в более поздней позиции). Реализация: при отбрасывании смотрим, не остался ли в `selected` сразу за выбрасываемой границей «осиротевший» assistant без своего user — если да, тоже его исключаем.
-  5. Финальный payload собирается в прямом порядке: `[system, ...selected, lastUserMessage]`.
+- **Decision**: Introduce a private flag in `RecordingViewModel`: `private var didConsumeFirstVoiceTurn: Bool = false`. The flag is reset to `false` when a new `ChatSession` is created (in `startRecording` / `reset`), and flipped to `true` immediately after the first voice request is dispatched to the LLM. `ChatSession.prepareMessagesForLLM` gets a new `isFirstVoiceTurn: Bool` parameter, which the ViewModel computes as `!didConsumeFirstVoiceTurn && isVoiceInitiated`.
 - **Rationale**:
-  - Сохраняет conversational coherence (assistant-ответ всегда имеет свой user-вопрос рядом).
-  - Сохраняет SC-008-проверку: «отбрасываются самые старые».
+  - "First voice message" is a session-lifecycle concept, which is the ViewModel's responsibility.
+  - Not stored inside `ChatSession`, because `ChatSession` doesn't know how a message originated (voice vs. typed chat input).
+  - Reset on session reset/recreate naturally follows ViewModel reinitialization.
 - **Alternatives considered**:
-  - Удалять по одному с начала — отверг: clarification Q3 = пары.
-  - Удалять по семантическим «турам» с сохранением последней пары — отверг: добавляет сложность без явной пользы; пользователь не отличит результат.
+  - Storing the flag in `ChatSession` — rejected: mixes message source (voice/text) with content.
+  - Detecting by the role of the first message in `messages` (`role == .transcription`) — rejected: transcription is not a distinct role for the second-and-onwards voice recording, and `.transcription` already maps to `user` in the API request; the signal is unreliable.
 
 ---
 
-## R-005: `simple-voice-to-text` — содержимое и read-only
+## R-004: History truncation in `user`/`assistant` pairs
+
+- **Decision**: Rework the algorithm in `ChatSession.prepareMessagesForLLM`:
+  1. The system prompt is always first, always preserved.
+  2. The latest `user` message is always preserved.
+  3. Walking `messages` from the end, accumulate them into `selected` (in reverse) while `totalTokens + nextMessage.tokens <= availableBudget`.
+  4. When the next message doesn't fit — drop a whole pair: the current oldest + its neighbor (usually the `assistant` paired with the user in the later position). Implementation: when dropping, check whether the next element in `selected` is an "orphaned" `assistant` without a matching user — if so, drop it too.
+  5. The final payload is collected in chronological order: `[system, ...selected, lastUserMessage]`.
+- **Rationale**:
+  - Preserves conversational coherence (an assistant reply always has its user question nearby).
+  - Satisfies SC-008 ("the oldest are dropped").
+- **Alternatives considered**:
+  - Drop one at a time from the start — rejected: clarification Q3 = pairs.
+  - Drop in semantic "turns" while keeping the last pair — rejected: extra complexity with no visible benefit.
+
+---
+
+## R-005: `simple-voice-to-text` — content and read-only
 
 - **Decision**:
-  - Все 10 локалей в `SystemPromptDefinition.simpleVoiceToText` переписываются на короткую формулировку. Проектные строки (одна на каждый язык):
+  - All 10 locales of `SystemPromptDefinition.simpleVoiceToText` are rewritten to the short phrasing. Design strings (one per language):
     - en: `"Fix spelling errors and add punctuation. Return only the corrected text."`
     - ru: `"Исправь орфографические ошибки и расставь знаки препинания. Верни только исправленный текст."`
     - es: `"Corrige los errores ortográficos y añade puntuación. Devuelve solo el texto corregido."`
@@ -79,116 +87,140 @@
     - ja: `"スペルミスを修正し、句読点を追加してください。修正されたテキストのみを返してください。"`
     - ko: `"맞춤법 오류를 수정하고 구두점을 추가하세요. 수정된 텍스트만 반환하세요."`
     - it: `"Correggi gli errori di ortografia e aggiungi la punteggiatura. Restituisci solo il testo corretto."`
-  - Чекбокс `answerQuestionsInFirstMessage` для `simple-voice-to-text` зафиксирован в `false`.
-  - В `SystemPrompt` появляется computed property `var isReadOnly: Bool { isSystem && systemId == "simple-voice-to-text" }`. Это локализованное правило, не требует нового поля в Codable.
-  - В `PromptsStore.migrateIfNeeded` (`currentDataVersion = 3`) после загрузки прокидывается принудительная синхронизация: для каждого промпта с `isSystem && systemId == "simple-voice-to-text"` — `content` и `name` перезаписываются из `SystemPromptDefinition.simpleVoiceToText`. После миграции `dataVersion` пишется как `3`.
+  - For `simple-voice-to-text`, the `answerQuestionsInFirstMessage` checkbox is pinned at `false`.
+  - `SystemPrompt` gains a computed property `var isReadOnly: Bool { isSystem && systemId == "simple-voice-to-text" }`. This is a code-side rule; it does not need a new Codable field.
+  - In `PromptsStore.migrateIfNeeded` (`currentDataVersion = 3`), after loading, a force sync is performed: for every prompt with `isSystem && systemId == "simple-voice-to-text"`, `content` and `name` are rewritten from `SystemPromptDefinition.simpleVoiceToText`. After migration, `dataVersion` is set to `3`.
 - **Rationale**:
-  - Формулировки соответствуют Clarification Q2 («force-rewrite»).
-  - Использование computed `isReadOnly` вместо нового Codable-поля исключает риск рассинхронизации файла и кода: правило задаётся в одном месте.
-  - Миграция дозированная: затрагивает только конкретный промпт по `systemId`.
+  - The phrasings follow Clarification Q2 ("force-rewrite").
+  - Using a computed `isReadOnly` instead of a new Codable field avoids the file/code drift risk: the rule lives in a single place.
+  - The migration is targeted: only the specific prompt by `systemId` is touched.
 - **Alternatives considered**:
-  - Добавить Codable-поле `isReadOnly: Bool` в `SystemPrompt` — отверг: лишняя сущность, дублирует семантику `isSystem`.
-  - Удалять и пересоздавать запись `simple-voice-to-text` при миграции — отверг: теряется UUID, ломаются ссылки (`isDefault` мог быть выбран на этой записи).
+  - Add a Codable `isReadOnly: Bool` to `SystemPrompt` — rejected: extra entity, duplicates the semantics of `isSystem`.
+  - Delete and recreate the `simple-voice-to-text` record during migration — rejected: the UUID would change and references (e.g. `isDefault` set on this record) would break.
 
 ---
 
-## R-006: Унификация streaming и non-streaming веток `sendMessage`
+## R-006: Unifying the streaming path in `RecordingViewModel`
 
-- **Decision**: В `RecordingViewModel.sendMessage` non-streaming ветка (`formattingService.format(text:systemPrompt:...)`) удаляется. Все отправки идут через `streamingService.streamChat(messages: messagesForAPI, model: ...)`, который уже принимает полный массив сообщений и стримит токены. Если `streamingService == nil` (теоретически не должно случаться в production-конфигурации) — выбрасывается ошибка инициализации, а не fallback к одиночному вызову.
+- **Decision**: Both LLM send paths use **`streamingService.streamChat(messages:model:)`** with an explicitly built `messages` array.
+  - **Continuation (`sendMessage`)**: the non-streaming branch (`formattingService.format(...)`) is removed. The array is built via `ChatSession.prepareMessagesForLLM(isFirstVoiceTurn: false, ...)` → chat-mode system + full history + new user message (see R-012).
+  - **First voice turn (`stopRecording`)**: no longer uses `streamFormat`. Instead, `RecordingViewModel` builds the system content manually: `PromptEnhancer.enhance(...)` + (optionally) `"\n\n## Critical Instruction\n\n" + DoNotAnswerInstruction.text(...)` → handed to `streamChat`. This gives explicit control over the DoNotAnswer position (see R-002) — `streamFormat` ran `PromptEnhancer` internally, making "after" injection impossible.
+  - If `streamingService == nil` — `sendMessage` throws `RecordingError.formattingFailed("Streaming service unavailable")` (the F3 fix).
 - **Rationale**:
-  - Текущая non-streaming ветка отправляет ровно один `text` и не использует историю — это и есть тот баг, который US3/FR-005/FR-008 закрывают.
-  - StreamingFormattingService уже корректно принимает `[(role, content)]` массив через `streamChat(messages:)`.
-  - Единый путь упрощает поддержку: FR-006 (edited messages), FR-007 (truncate), FR-006 (chain) — реализуются только в одном месте — в `prepareMessagesForLLM`.
+  - The old non-streaming branch of `sendMessage` sent only one `text` without history — that's the original bug (US3 / FR-005 / FR-008).
+  - Using `streamChat` directly for the first turn gives explicit control over the DoNotAnswerInstruction position (R-002) — critical for small models.
+  - `streamChat` already accepts a `[(role, content)]` array correctly.
+  - A unified path simplifies maintenance: FR-006 (edited), FR-007 (truncate), FR-006 (chain) live in `prepareMessagesForLLM` for continuation, while the first turn lives in `RecordingViewModel.stopRecording`.
 - **Alternatives considered**:
-  - Поддерживать обе ветки и пробросить полный array в каждую — отверг: дублирование, риск расхождения форматирования.
-  - Использовать non-streaming как «без стриминга» fallback — отверг: streaming уже работает стабильно (см. ProcessingRouterTests); смысла поддерживать оба пути нет.
+  - Use `streamFormat` for the first turn as well — rejected: there is no way to insert DoNotAnswer AFTER `PromptEnhancer` (see R-002).
+  - Extend `streamFormat` with `additionalSystemSuffix: String?` — rejected: an API surface enlargement for a single call site; explicit composition in RecordingViewModel is cleaner.
+  - Keep both branches in `sendMessage` — rejected: duplication, risk of formatting divergence.
 
 ---
 
-## R-007: Disabled-состояние Send и кнопки повторной голосовой записи на время стрима
-
-- **Decision**: 
-  - В `OverlayContentView` пробросить `isStreaming: Bool` (вычислять как `chatSession?.lastAssistantMessage?.isStreaming == true`) в `InputBar` и в overlay-кнопки voice-input.
-  - На SwiftUI Toggle — `.disabled(isStreaming)`; кнопка повторной записи `.disabled(isStreaming || ...)` (составной условие включает существующие state-проверки `.idle`).
-  - Дополнительно сделать defensive guard в `sendMessage`: если `lastAssistantMessage?.isStreaming == true` — return.
-- **Rationale**:
-  - Соответствует Clarification Q4 (blocking strategy).
-  - SwiftUI `.disabled` — идиоматическое решение, не требует нового state-machine.
-- **Alternatives considered**:
-  - Cancel-and-resend — отверг: clarification Q4.
-  - Queue — отверг: clarification Q4.
-
----
-
-## R-008: Размещение чекбокса и tooltip в Settings → System Prompts
+## R-007: Disabled state of Send and the re-record voice button during streaming
 
 - **Decision**:
-  - В `SettingsView` в секции редактирования промпта (под полем `content`) добавить горизонтальный `HStack`:
+  - In `OverlayContentView`, propagate `isStreaming: Bool` (computed as `chatSession?.lastAssistantMessage?.isStreaming == true`) to `InputBar` and the voice-input overlay buttons.
+  - On the SwiftUI Toggle — `.disabled(isStreaming)`; the re-record button — `.disabled(isStreaming || ...)` (combined with the existing state checks for `.idle`).
+  - Additionally a defensive guard in `sendMessage`: if `lastAssistantMessage?.isStreaming == true` — `return`.
+- **Rationale**:
+  - Matches Clarification Q4 (blocking strategy).
+  - SwiftUI `.disabled` is idiomatic; no new state machine needed.
+- **Alternatives considered**:
+  - Cancel-and-resend — rejected: clarification Q4.
+  - Queue — rejected: clarification Q4.
+
+---
+
+## R-008: Placing the checkbox and tooltip in Settings → System Prompts
+
+- **Decision**:
+  - In `SettingsView`, inside the prompt-editor section (below the `content` field), add a horizontal `HStack`:
     - `Toggle("answer_in_first_message_label".localized, isOn: $prompt.answerQuestionsInFirstMessage).disabled(prompt.isReadOnly)`
     - `Button(action: { showHelp = true }) { Image(systemName: "questionmark.circle") }.popover(isPresented: $showHelp) { Text(helpText) }`
-  - Локализованные ключи:
-    - `answer_in_first_message_label` = «Отвечать на вопросы в первом сообщении?» (ru), «Answer questions in the first message?» (en), и аналогично для остальных 8 локалей.
-    - `answer_in_first_message_help` = пояснение «При включении модель может отвечать на вопросы, прозвучавшие в первом голосовом сообщении. При выключении — только форматирует текст. Действует только на первое сообщение сессии.»
-  - Для `simple-voice-to-text` (read-only): controls для content/name/toggle отображаются в disabled-состоянии; кнопка Delete скрыта (`.disabled(prompt.isReadOnly)` + условное `.hidden()` для Delete).
+  - Localization keys:
+    - `answer_in_first_message_label` = "Answer questions in the first message?" (en), "Отвечать на вопросы в первом сообщении?" (ru), and analogous for the other 8 locales.
+    - `answer_in_first_message_help` = "When ON the model may answer questions heard in the first voice message. When OFF it only formats the text. Applies to the first message of the session only."
+  - For `simple-voice-to-text` (read-only): content/name/toggle controls are shown disabled; the Delete button is hidden (`.disabled(prompt.isReadOnly)` + a conditional `.hidden()` for Delete).
 - **Rationale**:
-  - Использует существующий паттерн локализации проекта (`Localizable.xcstrings`).
-  - Не вводит новое окно/sheet — pop-over по icon-info это стандарт macOS.
+  - Uses the project's existing localization pattern (`Localizable.xcstrings`).
+  - Introduces no new window/sheet — a popover next to an info icon is a macOS standard.
 - **Alternatives considered**:
-  - Inline-описание под Toggle — отверг: визуально перегружает форму редактирования.
-  - Отдельный «Advanced» pane — отверг: оверкилл для одной настройки.
+  - Inline description under the Toggle — rejected: visually overloads the editor form.
+  - A separate "Advanced" pane — rejected: overkill for one setting.
 
 ---
 
-## R-009: Логирование (Principle 6)
+## R-009: Logging (Principle 6)
 
-- **Decision**: Добавляются INFO/DEBUG-логи:
-  - **INFO** при `prepareMessagesForLLM`: `prepareMessagesForLLM done` с metadata: `messageCount`, `droppedPairs`, `isFirstVoiceTurn`, `answerQuestionsInFirstMessage`, `injectedDoNotAnswer` (bool).
-  - **INFO** при miграции `PromptsStore` v2 → v3: `Migrated simple-voice-to-text content` с metadata: `previousContentHash` (только хеш, не содержимое), `language`.
-  - **DEBUG** при инжекции `do-not-answer`: содержимое полного системного промпта (с `privacy: .private`) для отладки.
-  - **DEBUG** при усечении: список индексов отброшенных сообщений и итоговый `totalTokens`.
-  - Содержимое чат-сообщений и текст транскрипции — **никогда не логируются на INFO**; на DEBUG — с `\(text, privacy: .private)` (нативное macOS-маскирование).
-- **Rationale**: соответствует Principle 6 и existing pattern в `ChatSession`/`ProcessingRouter`.
-
----
-
-## R-010: Тестирование (Principle 5)
-
-Тестируемые слои и mocking-стратегия:
-
-- **`SystemPromptTests`**: добавить tests на `Codable` round-trip с/без поля `answerQuestionsInFirstMessage` (миграция формата старого файла); `isReadOnly` computed property для `simple-voice-to-text` vs custom prompts.
-- **`ChatSessionTests`** (новый/расширяемый): unit-tests `prepareMessagesForLLM`:
-  - Когда история помещается в бюджет — все сообщения проходят.
-  - Когда не помещается — отбрасываются пары с начала; одиночный осиротевший assistant в начале отрезается.
-  - Системный промпт и последнее user-сообщение всегда сохраняются.
-  - При `isFirstVoiceTurn=true, answerQuestionsInFirstMessage=false` — в system message появляется инструкция «не отвечать» в `voiceLanguage`.
-  - При `isFirstVoiceTurn=false` — инструкция отсутствует.
-  - Edited message: после изменения `message.content` payload содержит новый текст.
-- **`PromptsStoreTests`** (новый/расширяемый): тест миграции v2 → v3 на фейковом JSON-файле; force-rewrite `simple-voice-to-text` контента с любой кастомной формы → новая формулировка.
-- **`RecordingViewModelTests`** (минимально, если уже есть mock-инфраструктура): unit-test что `sendMessage` действительно вызывает `streamingService.streamChat` с массивом, начинающимся с системного промпта + последнее сообщение пользователя в конце.
-
-Mocking: API уже за protocol'ами (`StreamingFormattingServiceProtocol`, `TranscriptionServiceProtocol`), новых mock'ов не требуется.
+- **Decision**: INFO/DEBUG-level logs added:
+  - **INFO** on `prepareMessagesForLLM`: `prepareMessagesForLLM done` with metadata: `messageCount`, `droppedPairs`, `isFirstVoiceTurn`, `answerQuestionsInFirstMessage`, `injectedDoNotAnswer` (bool).
+  - **INFO** on the `PromptsStore` v2 → v3 migration: `Migrated simple-voice-to-text content` with metadata: `previousContentHash` (hash only, not the content), `language`.
+  - **DEBUG** on the `do-not-answer` injection: the full system prompt (with `privacy: .private`) for debugging.
+  - **DEBUG** on truncation: indices of the dropped messages and the resulting `totalTokens`.
+  - Chat message and transcription content are **never logged at INFO**; at DEBUG — with `\(text, privacy: .private)` (native macOS masking).
+- **Rationale**: matches Principle 6 and the existing pattern in `ChatSession` / `ProcessingRouter`.
 
 ---
 
-## R-011: Совместимость и rollback
+## R-010: Testing (Principle 5)
 
-- **Decision**: Миграция `currentDataVersion = 3` строго прямая (forward-only). Откат на предыдущую версию приложения корректно прочитает файл (на чтении игнорирует неизвестное поле `answerQuestionsInFirstMessage` — это стандартное поведение `Codable.decodeIfPresent`, которое в `SystemPrompt.init(from:)` уже применяется к новым полям при добавлении). Перезаписанный content `simple-voice-to-text` в старой версии будет восприниматься как пользовательская кастомизация, но визуально совпадёт с тем же текстом — никаких ошибок.
-- **Rationale**: даёт безопасное возвращение к предыдущему build без потерь.
+Tested layers and mocking strategy:
+
+- **`SystemPromptTests`**: tests on `Codable` round-trip with/without the `answerQuestionsInFirstMessage` field (legacy file format migration); `isReadOnly` computed property for `simple-voice-to-text` vs. custom prompts.
+- **`ChatSessionTests`** (new / extended): unit tests for `prepareMessagesForLLM`:
+  - When the history fits the budget — all messages go through.
+  - When it does not — pairs are dropped from the start; an orphaned `assistant` at the head is dropped too.
+  - The system prompt and the latest user message are always preserved.
+  - With `isFirstVoiceTurn=true, answerQuestionsInFirstMessage=false` — the system message gains the "do not answer" instruction in `voiceLanguage`.
+  - With `isFirstVoiceTurn=false` — the instruction is absent.
+  - Edited message: after updating `message.content`, the payload contains the new text.
+- **`PromptsStoreTests`** (new / extended): v2 → v3 migration test on a fake JSON file; force-rewriting `simple-voice-to-text` content from any custom form → the new phrasing.
+- **`RecordingViewModelTests`** (minimal, if mock infrastructure already exists): unit test that `sendMessage` actually calls `streamingService.streamChat` with an array starting with the system prompt and the latest user message at the end.
+
+Mocking: the API is already protocol-based (`StreamingFormattingServiceProtocol`, `TranscriptionServiceProtocol`); no new mocks needed.
 
 ---
 
-## Сводный список разрешённых вопросов
+## R-011: Compatibility and rollback
 
-| Источник | Вопрос | Решение |
+- **Decision**: The migration `currentDataVersion = 3` is strictly forward-only. Rolling back to a previous app version reads the file cleanly (an unknown `answerQuestionsInFirstMessage` field is ignored — the standard `Codable.decodeIfPresent` behavior already applied in `SystemPrompt.init(from:)`). The rewritten `simple-voice-to-text` content in the old version is interpreted as a user customization, but visually matches the same text — no errors.
+- **Rationale**: provides safe rollback to the previous build without data loss.
+
+---
+
+## R-012: Continuation system message (chat-mode override)
+
+- **Decision**: For every session message **after the first voice turn**, `ChatSession.prepareMessagesForLLM` substitutes a **minimal chat-mode system message** in place of the user's dictation prompt. Content: `"You are a helpful assistant. Respond in <textLanguage.displayName>."`. The dialogue history (including the first voice transcription and the first formatted reply) is kept in the payload unchanged — the model uses it as context. This override fires when `isFirstVoiceTurn == false` (i.e. always for `sendMessage`).
+- **Rationale**:
+  - **Empirically confirmed bug**: when the dictation prompt (`Fix spelling errors and add punctuation. Return only the corrected text.`) was left in place, the LLM treated every continuation message as another piece of text to format. To "What did I forget — where were we running?" it returned the same question with proper punctuation, instead of replying in chat style.
+  - **Source vs. first message**: user feedback confirmed that the user distinguishes "dictation → formatting" from "chat → conversation". Continuation messages belong to the second category by default.
+  - **Language pin**: keep the `Respond in <lang>` directive so the model doesn't switch to the chat input's language.
+  - **Context preserved**: the entire history (including transcription) is passed as regular chat history, so the model sees that the user dictated X, it was formatted into Y, and now they're asking Z.
+- **Alternatives considered**:
+  - Keep the dictation prompt + add a conditional hint like "if the last message is a question, reply conversationally, otherwise format" — rejected: the user explicitly said that having the model "figure it out" is unreliable; an explicit architectural split is better.
+  - A per-prompt "applies only to first message" flag — rejected: extra UI complexity; for every current use case the dictation prompt is intrinsically applicable only to the first turn.
+  - Distinguishing the message source (voice vs. text) and applying the dictation prompt to voice-2+, chat-mode to text — rejected as over-engineering. The current implementation already handles it: a repeated voice recording appends the transcription to `inputText`, which then goes through `sendMessage` as a normal continuation.
+
+---
+
+## Summary of resolved questions
+
+| Source | Question | Decision |
 |----------|--------|---------|
 | Spec (Q1) | Edit cascade behavior | Keep subsequent history as-is |
 | Spec (Q2) | `simple-voice-to-text` migration + editability | Force-rewrite + read-only |
 | Spec (Q3) | Truncation granularity | Pairs user/assistant |
 | Spec (Q4) | Send while streaming | Block (disable controls) |
 | Spec (Q5) | Language of "do-not-answer" instruction | Localized to voiceLanguage + English fallback |
+| Spec (Q6, 05-28) | Dictation prompt in continuation messages? | **No** — chat-mode override |
+| Spec (Q7, 05-28) | DoNotAnswer position in system message | **End**, under `## Critical Instruction` |
+| Spec (Q8, 05-28) | DoNotAnswer wording strength | Strengthened with explicit example/counter-example |
 | Plan (R-001) | Where to store the new toggle | In `SystemPrompt`, Codable |
 | Plan (R-003) | Where to track "first voice turn" | In `RecordingViewModel`, ephemeral |
-| Plan (R-006) | Streaming vs non-streaming branches | Unify to streaming only |
+| Plan (R-006) | Streaming vs non-streaming branches | Unify to streamChat (both first turn + continuation) |
 | Plan (R-008) | UI placement | Inline `Toggle` + `?` icon popover under content field |
+| Plan (R-012, 05-28) | Continuation system message | Chat-mode override (`"You are a helpful assistant. Respond in <lang>."`) |
 
-Все `[NEEDS CLARIFICATION]` resolved.
+All `[NEEDS CLARIFICATION]` markers are resolved.

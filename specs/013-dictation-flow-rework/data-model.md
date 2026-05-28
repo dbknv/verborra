@@ -1,62 +1,62 @@
-# Data Model: Переработка flow диктовки (v0.13)
+# Data Model: Dictation Flow Rework (v0.13)
 
-**Дата**: 2026-05-27
-**Источник**: [spec.md](spec.md), [research.md](research.md)
+**Date**: 2026-05-27
+**Source**: [spec.md](spec.md), [research.md](research.md)
 
-В этой фиче не вводятся новые сущности — расширяется и переформулируется работа двух существующих: `SystemPrompt` и `ChatSession`. Транзитивно изменяется поведение `PromptsStore` (миграция данных) и `RecordingViewModel` (контроль «первого голосового сообщения»).
+This feature introduces no new entities — it extends and reshapes the behavior of two existing ones: `SystemPrompt` and `ChatSession`. Transitively, it changes the behavior of `PromptsStore` (data migration) and `RecordingViewModel` (tracking the "first voice message").
 
 ---
 
-## Сущность: `SystemPrompt`
+## Entity: `SystemPrompt`
 
-**Файл**: `Verborra/Models/SystemPrompt.swift`
+**File**: `Verborra/Models/SystemPrompt.swift`
 
-### Поля
+### Fields
 
-| Поле | Тип | Default | Codable | Описание |
+| Field | Type | Default | Codable | Description |
 |------|-----|---------|---------|----------|
-| `id` | `UUID` | автогенерируется | yes | Идентификатор записи. **Без изменений.** |
-| `name` | `String` | localized | yes | Имя промпта, видимое в UI. **Без изменений.** |
-| `content` | `String` | localized | yes | Тело системного промпта. **Без изменений в схеме.** Для `simple-voice-to-text` — упрощённое содержимое (см. SystemPromptDefinition). |
-| `isDefault` | `Bool` | false | yes | Это дефолтный промпт сессии. **Без изменений.** |
-| `isSystem` | `Bool` | false | yes | Системный (встроенный) промпт. **Без изменений.** |
-| `systemId` | `String?` | nil | yes | ID встроенного промпта (`"simple-voice-to-text"`). **Без изменений.** |
-| **`answerQuestionsInFirstMessage`** | **`Bool`** | **`false`** | **yes** | **НОВОЕ.** Когда `true` — модель может отвечать на вопросы, прозвучавшие внутри первого голосового сообщения сессии. Когда `false` — к системному промпту добавляется инструкция «не отвечать». Применяется ТОЛЬКО к первому голосовому сообщению; на остальные сообщения сессии не влияет. |
+| `id` | `UUID` | auto-generated | yes | Record identifier. **Unchanged.** |
+| `name` | `String` | localized | yes | Prompt name as shown in the UI. **Unchanged.** |
+| `content` | `String` | localized | yes | System-prompt body. **Schema unchanged.** For `simple-voice-to-text` it carries the simplified text (see `SystemPromptDefinition`). |
+| `isDefault` | `Bool` | false | yes | The session default prompt. **Unchanged.** |
+| `isSystem` | `Bool` | false | yes | Built-in (system) prompt. **Unchanged.** |
+| `systemId` | `String?` | nil | yes | Built-in prompt ID (`"simple-voice-to-text"`). **Unchanged.** |
+| **`answerQuestionsInFirstMessage`** | **`Bool`** | **`false`** | **yes** | **NEW.** When `true`, the model may answer questions inside the first voice message of the session. When `false`, an explicit "do not answer" instruction is added to the system prompt. Applies ONLY to the first voice message; later messages in the session are not affected. |
 
-### Computed properties
+### Computed Properties
 
-| Свойство | Тип | Описание |
+| Property | Type | Description |
 |----------|-----|----------|
-| **`isReadOnly`** | **`Bool`** | **НОВОЕ.** `true`, если `isSystem == true && systemId == "simple-voice-to-text"`. Хранимым полем не является — правило вычисляется в коде. UI обязан использовать `isReadOnly` для disable/hide controls. |
+| **`isReadOnly`** | **`Bool`** | **NEW.** `true` iff `isSystem == true && systemId == "simple-voice-to-text"`. Not a stored field — the rule lives in code. The UI must use `isReadOnly` to disable/hide its controls. |
 
-### Codable / миграция
+### Codable / migration
 
-- `init(from decoder:)` декодирует `answerQuestionsInFirstMessage` через `decodeIfPresent(Bool.self, forKey: .answerQuestionsInFirstMessage) ?? false`. Старые файлы без этого поля корректно загружаются с дефолтом `false`. Соответствие FR-010.
-- `encode(to:)` всегда пишет `answerQuestionsInFirstMessage`.
-- В `CodingKeys` добавляется case `answerQuestionsInFirstMessage`.
-- Поле `voiceLanguage` / `textLanguage` (v1 legacy) остаётся в `MigrationPrompt`, как сейчас — без изменений.
+- `init(from decoder:)` decodes `answerQuestionsInFirstMessage` via `decodeIfPresent(Bool.self, forKey: .answerQuestionsInFirstMessage) ?? false`. Old files without this field load cleanly with the default `false`. Matches FR-010.
+- `encode(to:)` always writes `answerQuestionsInFirstMessage`.
+- A `answerQuestionsInFirstMessage` case is added to `CodingKeys`.
+- The legacy `voiceLanguage` / `textLanguage` (v1) fields remain in `MigrationPrompt`, unchanged.
 
-### Инварианты
+### Invariants
 
-- INV-1: Для всех `SystemPrompt`, у которых `isReadOnly == true`, любое изменение `content`, `name`, `answerQuestionsInFirstMessage` через `PromptsStore.updatePrompt` либо игнорируется, либо запрещается на UI-уровне до вызова store. (Проще: UI скрывает controls; store-уровневая защита факультативна.)
-- INV-2: Поле `answerQuestionsInFirstMessage` для `simple-voice-to-text` всегда `false` после миграции — обеспечивается принудительной записью в `PromptsStore.migrateIfNeeded`.
+- INV-1: For every `SystemPrompt` with `isReadOnly == true`, any change to `content`, `name`, `answerQuestionsInFirstMessage` via `PromptsStore.updatePrompt` is either ignored or prevented at the UI layer before reaching the store. (Simpler form: the UI hides the controls; store-level enforcement is optional.)
+- INV-2: `answerQuestionsInFirstMessage` for `simple-voice-to-text` is always `false` after migration — guaranteed by the force-write in `PromptsStore.migrateIfNeeded`.
 
-### Фабрика и инициализация
+### Factory and initialization
 
-- `SystemPrompt.makeDefault()` — без изменений по смыслу, но теперь возвращает SystemPrompt с `answerQuestionsInFirstMessage: false`.
-- При добавлении нового пользовательского промпта через UI значение `answerQuestionsInFirstMessage` инициализируется как `false` (FR-011).
+- `SystemPrompt.makeDefault()` — semantically unchanged, now returns a `SystemPrompt` with `answerQuestionsInFirstMessage: false`.
+- When a new user prompt is added via the UI, `answerQuestionsInFirstMessage` is initialized to `false` (FR-011).
 
 ---
 
-## Сущность: `SystemPromptDefinition`
+## Entity: `SystemPromptDefinition`
 
-**Файл**: `Verborra/Models/SystemPromptDefinition.swift`
+**File**: `Verborra/Models/SystemPromptDefinition.swift`
 
-### Изменения
+### Changes
 
-Структура остаётся та же: `id`, `translations: [SupportedLanguage: (name, content)]`. Меняется только содержимое `translations` для `simpleVoiceToText` — каждая локаль получает новый, упрощённый `content` (точные строки — см. research.md R-005). Имя (`name`) остаётся прежним («Simple Voice To Text», «Речь в текст», и т. д.) — пользователь не требовал переименовывать.
+The struct itself is unchanged: `id`, `translations: [SupportedLanguage: (name, content)]`. Only the contents of `translations` for `simpleVoiceToText` change — each locale gets the new, simplified `content` (exact strings: see research.md R-005). The `name` is left as-is ("Simple Voice To Text", "Речь в текст", etc.) — the user did not request renaming.
 
-Дополнительно вводится новая статическая константа `doNotAnswerInstructions`:
+Additionally, a new static constant `DoNotAnswerInstruction` is introduced:
 
 ```swift
 struct DoNotAnswerInstruction {
@@ -78,99 +78,102 @@ struct DoNotAnswerInstruction {
 }
 ```
 
-Поведение fallback (отсутствует перевод → English) совпадает с существующим `SystemPromptDefinition.content(for:)`.
+> NOTE: in the implemented version (Phase 8) every translation was strengthened and now includes a concrete example/counter-example — see FR-003c and research.md R-002.
+
+The fallback behavior (missing translation → English) matches the existing `SystemPromptDefinition.content(for:)`.
 
 ---
 
-## Сущность: `ChatSession`
+## Entity: `ChatSession`
 
-**Файл**: `Verborra/Models/ChatSession.swift`
+**File**: `Verborra/Models/ChatSession.swift`
 
-### Изменения интерфейса
+### Interface changes
 
-Метод `prepareMessagesForLLM` получает новый параметр:
+`prepareMessagesForLLM` gets new parameters:
 
 ```swift
 func prepareMessagesForLLM(
     maxTokenBudget: Int,
     systemPromptTokens: Int,
-    isFirstVoiceTurn: Bool,                    // НОВОЕ
-    answerQuestionsInFirstMessage: Bool         // НОВОЕ
+    isFirstVoiceTurn: Bool,                    // NEW
+    answerQuestionsInFirstMessage: Bool         // NEW
 ) -> [(role: String, content: String)]
 ```
 
-### Логика метода (после изменений)
+### Method behavior (after changes)
 
-1. Сформировать `systemContent`:
-   - База: `systemPrompt.contentForLanguage(voiceLanguage)`.
-   - Если `isFirstVoiceTurn && !answerQuestionsInFirstMessage` — добавить через `\n\n` локализованную инструкцию `DoNotAnswerInstruction.text(for: voiceLanguage)`.
-   - Добавить через `\n\n` `"Язык ответа: <textLanguage.displayName>"` (как сейчас).
-2. Сформировать `payload`:
-   - Первым элементом — `("system", systemContent)`.
-   - Из `messages` отфильтровать `.system` (как сейчас).
-   - Накопить «хвост» сообщений в обратном порядке с проверкой `totalTokens + tokens <= availableBudget`.
-   - Усечение **парами**: при превышении бюджета — отбросить пару (текущее старое + следующее по позиции). Если в начале результирующего набора остался одиночный assistant без своего user — также отрезать.
-   - Включить последнее user-сообщение всегда (приоритетно).
-   - Восстановить прямой порядок и вернуть.
-3. Все `message.content` берутся **по текущему значению** — это автоматически обеспечивает FR-006 (правки).
+1. Build `systemContent`:
+   - Base: `systemPrompt.contentForLanguage(voiceLanguage)`.
+   - If `isFirstVoiceTurn && !answerQuestionsInFirstMessage` — append, separated by `\n\n`, the localized `DoNotAnswerInstruction.text(for: voiceLanguage)`.
+   - Append, separated by `\n\n`, `"Язык ответа: <textLanguage.displayName>"` (existing behavior).
+   - **(Phase 8 refinement, R-012 / FR-005a)**: for continuation messages (`isFirstVoiceTurn == false`) the user's dictation prompt is REPLACED with a chat-mode hint `"You are a helpful assistant. Respond in <textLanguage.displayName>."` — no full base prompt and no `DoNotAnswerInstruction`.
+2. Build `payload`:
+   - First element: `("system", systemContent)`.
+   - Filter `messages` to exclude `.system` (existing behavior).
+   - Accumulate the "tail" of messages in reverse, with `totalTokens + tokens <= availableBudget`.
+   - **Pair truncation**: on budget overflow, drop a whole pair (the current oldest + the next-in-position). If a lone assistant remains at the head of the resulting selection without a matching user — drop it too.
+   - Always include the latest user message (highest priority).
+   - Restore the natural order and return.
+3. Every `message.content` is read at the time of the call — this automatically satisfies FR-006 (edits).
 
-### Инварианты
+### Invariants
 
-- INV-3: Первый элемент payload — всегда `("system", ...)`.
-- INV-4: Последний элемент payload — всегда последнее `user`-сообщение (включая повторные голосовые записи).
-- INV-5: В `selectedMessages` не существует одиночного assistant в начале без соответствующего user.
-- INV-6: Текст сообщений в payload равен `message.content` на момент вызова `prepareMessagesForLLM` — никакого кэширования предыдущих версий.
+- INV-3: The first element of the payload is always `("system", ...)`.
+- INV-4: The last element of the payload is always the latest `user` message (including re-recordings).
+- INV-5: There is never a lone `assistant` at the head of `selectedMessages` without a matching `user`.
+- INV-6: The text of messages in the payload equals `message.content` at the moment `prepareMessagesForLLM` is called — no caching of previous versions.
 
-### Что НЕ меняется в `ChatSession`
+### What does NOT change in `ChatSession`
 
-- `messages: [ChatMessage]` — поле и его управление.
-- `addMessage`, `insertSystemMessage`, `lastAssistantMessage`, `updateLastAssistantContent`, `reset` — методы без изменений.
-- Маппинг ролей `.transcription, .user → "user"`, `.assistant → "assistant"` — без изменений.
+- `messages: [ChatMessage]` — the field and its mutators.
+- `addMessage`, `insertSystemMessage`, `lastAssistantMessage`, `updateLastAssistantContent`, `reset` — methods unchanged.
+- Role mapping `.transcription, .user → "user"`, `.assistant → "assistant"` — unchanged.
 
 ---
 
-## Сущность: `PromptsStore`
+## Entity: `PromptsStore`
 
-**Файл**: `Verborra/Services/PromptsStore.swift`
+**File**: `Verborra/Services/PromptsStore.swift`
 
-### Изменения
+### Changes
 
 - `currentDataVersion`: `2 → 3`.
-- `migrateIfNeeded()`: после загрузки промптов, если `version < 3`, выполняется новый блок:
-  1. Найти запись с `isSystem == true && systemId == "simple-voice-to-text"`.
-  2. Для каждой поддерживаемой локали `SystemPromptDefinition.simpleVoiceToText.translations.keys` принудительно перезаписать `name` и `content` теми, что лежат в `SystemPromptDefinition.simpleVoiceToText` (берётся `LocalizationManager.shared.currentLanguage` для актуального отображения; полная локализация осуществляется через `contentForLanguage`).
-  3. Установить `answerQuestionsInFirstMessage = false` (даже если в JSON-файле было `true`).
-  4. Сохранить файл и записать `dataVersion = 3`.
-- `addPrompt`/`updatePrompt`/`deletePrompt`: добавляется guard на read-only: для `prompt.isReadOnly == true` — `updatePrompt` игнорируется (или возвращается без эффекта), `deletePrompt` уже блокирует системные промпты — поведение не меняется.
+- `migrateIfNeeded()`: after the prompts are loaded, if `version < 3` a new block runs:
+  1. Find the record with `isSystem == true && systemId == "simple-voice-to-text"`.
+  2. Force-write `name` and `content` from `SystemPromptDefinition.simpleVoiceToText` (using `LocalizationManager.shared.currentLanguage` for the immediate display; full localization is handled via `contentForLanguage`).
+  3. Set `answerQuestionsInFirstMessage = false` (even if the JSON file had `true`).
+  4. Save the file and write `dataVersion = 3`.
+- `addPrompt`/`updatePrompt`/`deletePrompt`: a read-only guard is added: for `prompt.isReadOnly == true`, `updatePrompt` is ignored (or returns without effect), and `deletePrompt` already blocks system prompts — behavior unchanged.
 
-### Инвариант
+### Invariant
 
-- INV-7: После `migrateIfNeeded` файл всегда содержит ровно одну запись с `systemId == "simple-voice-to-text"` (создаётся, если её не было — через `ensureSystemPrompts`).
-
----
-
-## Сущность: `RecordingViewModel`
-
-**Файл**: `Verborra/ViewModels/RecordingViewModel.swift`
-
-### Изменения
-
-- Новое приватное состояние: `private var didConsumeFirstVoiceTurn: Bool = false`.
-- При создании новой `ChatSession` (в начале `processRecording` / при reset) — `didConsumeFirstVoiceTurn = false`.
-- Перед вызовом `streamingService.streamChat(...)`:
-  - Вычислить `isFirstVoiceTurn = !didConsumeFirstVoiceTurn && messageWasInitiatedFromVoice`.
-  - Передать в `prepareMessagesForLLM(isFirstVoiceTurn:, answerQuestionsInFirstMessage: selectedPrompt.answerQuestionsInFirstMessage)`.
-  - После успешной постановки запроса (или после первого полученного токена — точная точка фиксируется в Phase 2) — `didConsumeFirstVoiceTurn = true`.
-- В `sendMessage` (текстовый ввод в чате): `messageWasInitiatedFromVoice = false`, поэтому `isFirstVoiceTurn = false` всегда.
-- Defensive guard: если `chatSession?.lastAssistantMessage?.isStreaming == true` — `sendMessage` и `stopInputRecording` сразу `return`.
-
-### Инвариант
-
-- INV-8: `didConsumeFirstVoiceTurn` становится `true` максимум один раз за время жизни одной `ChatSession`. Reset/recreate сессии сбрасывает флаг.
+- INV-7: After `migrateIfNeeded`, the file always contains exactly one record with `systemId == "simple-voice-to-text"` (created if missing via `ensureSystemPrompts`).
 
 ---
 
-## Отношения между сущностями
+## Entity: `RecordingViewModel`
+
+**File**: `Verborra/ViewModels/RecordingViewModel.swift`
+
+### Changes
+
+- New private state: `private var didConsumeFirstVoiceTurn: Bool = false`.
+- When a new `ChatSession` is created (at the start of `processRecording` / on reset) — `didConsumeFirstVoiceTurn = false`.
+- Before calling `streamingService.streamChat(...)`:
+  - Compute `isFirstVoiceTurn = !didConsumeFirstVoiceTurn && messageWasInitiatedFromVoice`.
+  - Pass to `prepareMessagesForLLM(isFirstVoiceTurn:, answerQuestionsInFirstMessage: selectedPrompt.answerQuestionsInFirstMessage)`.
+  - After the request is successfully dispatched (or after the first token is received — the exact point is pinned in Phase 2) — `didConsumeFirstVoiceTurn = true`.
+- In `sendMessage` (text input in the chat): `messageWasInitiatedFromVoice = false`, so `isFirstVoiceTurn = false` always.
+- Defensive guard: if `chatSession?.lastAssistantMessage?.isStreaming == true` — `sendMessage` and `stopInputRecording` immediately `return`.
+
+### Invariant
+
+- INV-8: `didConsumeFirstVoiceTurn` becomes `true` at most once per `ChatSession` lifetime. Reset/recreate of the session clears the flag.
+
+---
+
+## Entity relationships
 
 ```text
 RecordingViewModel ── owns ──> ChatSession
@@ -186,13 +189,13 @@ SystemPromptDefinition (static registry) ── feeds ──> SystemPrompt (for 
 
 ---
 
-## Тестовая поверхность
+## Test surface
 
-| Слой | Что тестируется | Соответствие FR/SC |
+| Layer | What is tested | FR/SC mapping |
 |------|------------------|---------------------|
-| `SystemPrompt` Codable | Декодирование старого файла без поля → дефолт `false`; encode/decode round-trip с полем | FR-001, FR-010 |
-| `SystemPrompt.isReadOnly` | `true` для `simple-voice-to-text`, `false` для пользовательских и других системных | FR-009b |
-| `ChatSession.prepareMessagesForLLM` | Все 4 инварианта (INV-3..INV-6), pair-truncation, edited content, first-voice-turn injection | FR-003, FR-005, FR-006, FR-007, FR-008, SC-002, SC-007, SC-008 |
-| `PromptsStore.migrateIfNeeded` | v2 → v3 миграция: force-rewrite контента, dataVersion обновляется | FR-009, FR-009a |
-| `RecordingViewModel.sendMessage` | вызов `streamChat` с корректной структурой; блокировка во время `isStreaming` | FR-008, FR-015, SC-006 |
-| `SettingsView` (manual / snapshot) | Toggle visible/disabled для read-only промпта | FR-002, FR-009b |
+| `SystemPrompt` Codable | Decoding an old file without the field → default `false`; encode/decode round-trip with the field | FR-001, FR-010 |
+| `SystemPrompt.isReadOnly` | `true` for `simple-voice-to-text`, `false` for user-created and other system prompts | FR-009b |
+| `ChatSession.prepareMessagesForLLM` | All four invariants (INV-3..INV-6), pair truncation, edited content, first-voice-turn injection | FR-003, FR-005, FR-006, FR-007, FR-008, SC-002, SC-007, SC-008 |
+| `PromptsStore.migrateIfNeeded` | v2 → v3 migration: force-rewrite of the content, dataVersion bumped | FR-009, FR-009a |
+| `RecordingViewModel.sendMessage` | calling `streamChat` with the correct structure; blocking during `isStreaming` | FR-008, FR-015, SC-006 |
+| `SettingsView` (manual / snapshot) | Toggle visible/disabled for the read-only prompt | FR-002, FR-009b |

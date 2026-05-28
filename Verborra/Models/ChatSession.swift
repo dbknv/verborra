@@ -78,13 +78,30 @@ final class ChatSession: ChatSessionProtocol {
     ) -> [(role: String, content: String)] {
         let availableBudget = max(0, maxTokenBudget - systemPromptTokens)
 
-        // Build system prompt message (with optional do-not-answer injection).
-        let basePrompt = systemPrompt.contentForLanguage(voiceLanguage)
-        var systemContent = basePrompt
-        if isFirstVoiceTurn && !answerQuestionsInFirstMessage {
-            systemContent += "\n\n" + DoNotAnswerInstruction.text(for: voiceLanguage)
+        // Build the system message.
+        //
+        // First voice turn → dictation-oriented prompt (potentially with the
+        // do-not-answer injection). In current production code paths the first
+        // voice turn is dispatched via `streamFormat`, not this method; this
+        // branch exists for tests and future unification.
+        //
+        // Continuation messages → drop the dictation/formatting prompt entirely.
+        // The user is now refining or chatting about the formatted output, not
+        // asking for more formatting. Keep only a minimal chat-mode system
+        // message with the response-language directive so the assistant
+        // doesn't switch languages.
+        let systemContent: String
+        if isFirstVoiceTurn {
+            let basePrompt = systemPrompt.contentForLanguage(voiceLanguage)
+            var content = basePrompt
+            if !answerQuestionsInFirstMessage {
+                content += "\n\n" + DoNotAnswerInstruction.text(for: voiceLanguage)
+            }
+            content += "\n\nЯзык ответа: \(textLanguage.displayName)"
+            systemContent = content
+        } else {
+            systemContent = "You are a helpful assistant. Respond in \(textLanguage.displayName)."
         }
-        systemContent += "\n\nЯзык ответа: \(textLanguage.displayName)"
         var result: [(role: String, content: String)] = [("system", systemContent)]
 
         // Collect non-system messages and map roles for API.

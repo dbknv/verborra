@@ -79,6 +79,47 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertFalse(payload.first!.content.contains("Do not answer"))
     }
 
+    /// FR-005 refinement: continuation messages must NOT inherit the
+    /// dictation-oriented system prompt — the user is chatting about the
+    /// formatted output, not asking for more formatting. A minimal chat-mode
+    /// system message replaces it.
+    func testContinuation_dropsDictationPrompt_keepsChatMode() {
+        // Session whose prompt content is a formatting instruction.
+        let session = makeSession(
+            promptContent: "Fix spelling errors and add punctuation. Return only the corrected text.",
+            voice: .ru,
+            text: .ru
+        )
+        session.addMessage(ChatMessage(role: .transcription, content: "Привет мир"))
+        session.addMessage(ChatMessage(role: .assistant, content: "Привет, мир."))
+        session.addMessage(ChatMessage(role: .user, content: "А что я хотел сказать?"))
+
+        let payload = session.prepareMessagesForLLM(
+            maxTokenBudget: 10_000,
+            systemPromptTokens: 0,
+            isFirstVoiceTurn: false,
+            answerQuestionsInFirstMessage: false
+        )
+
+        let systemContent = payload.first!.content
+        XCTAssertFalse(
+            systemContent.contains("Fix spelling errors"),
+            "Continuation must not re-apply the dictation prompt"
+        )
+        XCTAssertFalse(
+            systemContent.contains("Return only the corrected text"),
+            "Continuation must not re-apply the dictation prompt"
+        )
+        XCTAssertTrue(
+            systemContent.localizedCaseInsensitiveContains("helpful assistant"),
+            "Continuation system message should be a generic chat-mode hint"
+        )
+        XCTAssertTrue(
+            systemContent.contains(SupportedLanguage.ru.displayName),
+            "Continuation system message must still pin the response language"
+        )
+    }
+
     func testInjection_localizedByVoiceLanguage_english() {
         let session = makeSession(voice: .en)
         session.addMessage(ChatMessage(role: .transcription, content: "anything"))

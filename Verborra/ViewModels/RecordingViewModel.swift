@@ -605,24 +605,38 @@ final class RecordingViewModel {
                 // before the await so the consumption is atomic with respect to
                 // subsequent voice recordings in this session.
                 let isFirstVoiceTurn = !didConsumeFirstVoiceTurn
-                let basePromptForFirstTurn: String = {
-                    let base = selectedPrompt.contentForLanguage(selectedTextLanguage)
-                    if isFirstVoiceTurn && !selectedPrompt.answerQuestionsInFirstMessage {
-                        return base + "\n\n" + DoNotAnswerInstruction.text(for: selectedVoiceLanguage)
+                let basePromptForFirstTurn = selectedPrompt.contentForLanguage(selectedTextLanguage)
+                let shouldInjectDoNotAnswer = isFirstVoiceTurn && !selectedPrompt.answerQuestionsInFirstMessage
+                // Compose the full system prompt: PromptEnhancer adds Response
+                // Language / Personal Preferences / Vocabulary first, then we
+                // append the DoNotAnswerInstruction LAST so the model sees it as
+                // the highest-priority directive (small models like gpt-4.1-nano
+                // weight later instructions more strongly).
+                let enhancedSystemPrompt: String = {
+                    let enhanced = PromptEnhancer().enhance(
+                        basePrompt: basePromptForFirstTurn,
+                        textLanguage: selectedTextLanguage,
+                        vocabularyEntries: vocabularyStore.entries,
+                        personalPreferences: settings.personalPreferencesText
+                    )
+                    if shouldInjectDoNotAnswer {
+                        return enhanced + "\n\n## Critical Instruction\n\n"
+                            + DoNotAnswerInstruction.text(for: selectedVoiceLanguage)
                     }
-                    return base
+                    return enhanced
                 }()
                 didConsumeFirstVoiceTurn = true
 
+                let firstTurnMessages: [(role: String, content: String)] = [
+                    ("system", enhancedSystemPrompt),
+                    ("user", rawText),
+                ]
+
                 if let streaming = streamingService {
                     do {
-                        let stream = streaming.streamFormat(
-                            text: rawText,
-                            systemPrompt: basePromptForFirstTurn,
-                            textLanguage: selectedTextLanguage,
-                            model: settings.selectedLLMModel,
-                            vocabularyEntries: vocabularyStore.entries,
-                            personalPreferences: settings.personalPreferencesText
+                        let stream = streaming.streamChat(
+                            messages: firstTurnMessages,
+                            model: settings.selectedLLMModel
                         )
                         var accumulated = ""
                         for try await token in stream {
@@ -630,10 +644,14 @@ final class RecordingViewModel {
                             chatSession?.updateLastAssistantContent(accumulated)
                         }
                     } catch {
-                        // Fallback to non-streaming on SSE error
+                        // Fallback to non-streaming on SSE error — use the same
+                        // composed system prompt.
                         let formattedText = try await formattingService.format(
                             text: rawText,
-                            systemPrompt: basePromptForFirstTurn,
+                            systemPrompt: basePromptForFirstTurn
+                                + (shouldInjectDoNotAnswer
+                                    ? "\n\n## Critical Instruction\n\n" + DoNotAnswerInstruction.text(for: selectedVoiceLanguage)
+                                    : ""),
                             textLanguage: selectedTextLanguage,
                             model: settings.selectedLLMModel,
                             vocabularyEntries: vocabularyStore.entries,
@@ -646,12 +664,12 @@ final class RecordingViewModel {
                     if let router = processingRouter {
                         formattedText = try await router.process(
                             text: rawText,
-                            systemPrompt: basePromptForFirstTurn
+                            systemPrompt: enhancedSystemPrompt
                         )
                     } else {
                         formattedText = try await formattingService.format(
                             text: rawText,
-                            systemPrompt: basePromptForFirstTurn,
+                            systemPrompt: enhancedSystemPrompt,
                             textLanguage: selectedTextLanguage,
                             model: settings.selectedLLMModel
                         )
