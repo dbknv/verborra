@@ -3,13 +3,11 @@ import Foundation
 // MARK: - FormattingServiceProtocol (T021)
 
 protocol FormattingServiceProtocol {
-    func format(text: String, systemPrompt: String, textLanguage: SupportedLanguage, model: LLMModel, vocabularyEntries: [VocabularyEntry], personalPreferences: String) async throws -> String
-}
-
-extension FormattingServiceProtocol {
-    func format(text: String, systemPrompt: String, textLanguage: SupportedLanguage, model: LLMModel) async throws -> String {
-        try await format(text: text, systemPrompt: systemPrompt, textLanguage: textLanguage, model: model, vocabularyEntries: [], personalPreferences: "")
-    }
+    /// Sends an already-assembled system prompt to the chat completions API.
+    /// Callers are expected to have run `SystemPromptBuilder.build(_:)` before
+    /// invoking this method — the service does NOT enhance or modify the
+    /// `systemPrompt` it receives.
+    func format(text: String, systemPrompt: String, textLanguage: SupportedLanguage, model: LLMModel) async throws -> String
 }
 
 // MARK: - FormattingService
@@ -35,9 +33,7 @@ final class FormattingService: FormattingServiceProtocol, LLMServiceProtocol {
         text: String,
         systemPrompt: String,
         textLanguage: SupportedLanguage,
-        model: LLMModel,
-        vocabularyEntries: [VocabularyEntry] = [],
-        personalPreferences: String = ""
+        model: LLMModel
     ) async throws -> String {
         // T040: INFO — начало запроса
         log.info("Chat Completions API request", metadata: [
@@ -58,23 +54,21 @@ final class FormattingService: FormattingServiceProtocol, LLMServiceProtocol {
             throw RecordingError.apiKeyNotConfigured
         }
 
-        let promptEnhancer = PromptEnhancer()
-        let fullSystemPrompt = promptEnhancer.enhance(
-            basePrompt: systemPrompt,
-            textLanguage: textLanguage,
-            vocabularyEntries: vocabularyEntries,
-            personalPreferences: personalPreferences
-        )
-
-        let requestBody: [String: Any] = [
+        // 014: callers pass an already-assembled prompt (via
+        // `SystemPromptBuilder`). The service does NOT enhance it further.
+        // GPT-5 reasoning models reject custom `temperature` — see
+        // `LLMModel.supportsTemperature`. Omit the key for them.
+        var requestBody: [String: Any] = [
             "model": model.rawValue,
             "messages": [
-                ["role": "system", "content": fullSystemPrompt],
+                ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": text],
             ],
-            "temperature": 0.2,
             "max_completion_tokens": 4000,
         ]
+        if model.supportsTemperature {
+            requestBody["temperature"] = 0.2
+        }
 
         var request = URLRequest(url: URL(string: baseURL)!)
         request.httpMethod = "POST"
@@ -87,9 +81,9 @@ final class FormattingService: FormattingServiceProtocol, LLMServiceProtocol {
         log.debug("Chat Completions request body", metadata: [
             "headers": SensitiveMasker.maskHeaders(request.allHTTPHeaderFields ?? [:]).description,
             "model": model.rawValue,
-            "temperature": "0.2",
+            "temperature": model.supportsTemperature ? "0.2" : "omitted",
             "maxTokens": "4000",
-            "systemPrompt": String(fullSystemPrompt.prefix(200)),
+            "systemPrompt": String(systemPrompt.prefix(200)),
             "userText": String(text.prefix(200))
         ])
 
@@ -120,8 +114,24 @@ final class FormattingService: FormattingServiceProtocol, LLMServiceProtocol {
                 case 200:
                     return try parseResponse(data)
                 case 401:
+                    let body = String(data: data, encoding: .utf8) ?? ""
+                    log.error(
+                        "Chat Completions API auth failed",
+                        parameters: ["body": String(body.prefix(2000))],
+                        errorCode: "401"
+                    )
                     throw RecordingError.apiKeyNotConfigured
                 case 429, 500...599:
+                    let body = String(data: data, encoding: .utf8) ?? ""
+                    log.error(
+                        "Chat Completions API transient error",
+                        parameters: [
+                            "status": "\(httpResponse.statusCode)",
+                            "attempt": "\(attempt + 1)",
+                            "body": String(body.prefix(2000))
+                        ],
+                        errorCode: "\(httpResponse.statusCode)"
+                    )
                     lastError = RecordingError.formattingFailed("Server error: \(httpResponse.statusCode)")
                     if attempt < maxRetries - 1 {
                         let delay = pow(2.0, Double(attempt))
@@ -129,7 +139,19 @@ final class FormattingService: FormattingServiceProtocol, LLMServiceProtocol {
                     }
                     continue
                 default:
+                    // 4xx other than 401 — surface OpenAI's error body so the log shows
+                    // e.g. "Unsupported value: 'temperature' does not support 0.2 with
+                    // this model. Only the default (1) value is supported." instead of
+                    // just the HTTP status code.
                     let message = String(data: data, encoding: .utf8) ?? "Status \(httpResponse.statusCode)"
+                    log.error(
+                        "Chat Completions API error",
+                        parameters: [
+                            "status": "\(httpResponse.statusCode)",
+                            "body": String(message.prefix(2000))
+                        ],
+                        errorCode: "\(httpResponse.statusCode)"
+                    )
                     throw RecordingError.formattingFailed(message)
                 }
             } catch let error as RecordingError {

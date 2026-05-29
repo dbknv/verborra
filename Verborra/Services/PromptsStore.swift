@@ -9,7 +9,7 @@ final class PromptsStore {
     private let log = DiagnosticLogger.logger(for: .settings)
 
     private static let dataVersionKey = "promptsDataVersion"
-    private static let currentDataVersion = 3
+    private static let currentDataVersion = 4
 
     var defaultPrompt: SystemPrompt {
         prompts.first(where: { $0.isDefault }) ?? prompts.first ?? SystemPrompt.makeDefault()
@@ -109,6 +109,24 @@ final class PromptsStore {
             }
         }
 
+        // ---- v3 → v4: re-sync the stored name/content for every system prompt
+        // from the registry. Needed because the English display name was
+        // renamed ("Simple Voice To Text" → "Speech To Text") and the stored
+        // `name` field is otherwise frozen at install time. User customizations
+        // can never apply here since system prompts are read-only.
+        if version < 4 {
+            let language = LocalizationManager.shared.currentLanguage
+            for i in prompts.indices where prompts[i].isSystem {
+                guard let systemId = prompts[i].systemId,
+                      let definition = SystemPromptRegistry.definition(for: systemId) else { continue }
+                prompts[i].name = definition.name(for: language)
+                prompts[i].content = definition.content(for: language)
+            }
+            log.info("Re-synced system-prompt names/content from registry (v4)", metadata: [
+                "language": language.rawValue
+            ])
+        }
+
         UserDefaults.standard.set(Self.currentDataVersion, forKey: Self.dataVersionKey)
         save()
     }
@@ -189,6 +207,19 @@ final class PromptsStore {
         if let index = prompts.firstIndex(where: { $0.id == id }) {
             prompts[index].isDefault = true
         }
+        save()
+    }
+
+    /// Updates only the `answerQuestionsInFirstMessage` toggle for the given
+    /// prompt. Unlike `updatePrompt(_:)`, this method bypasses the
+    /// `isReadOnly` guard: the read-only protection covers `name` and
+    /// `content` (FR-009b) but the per-prompt answer toggle is a behavioural
+    /// preference the user is allowed to set on any prompt, including
+    /// built-in ones. No-op if the value is unchanged.
+    func setAnswerInFirstMessage(promptID: UUID, value: Bool) {
+        guard let index = prompts.firstIndex(where: { $0.id == promptID }) else { return }
+        guard prompts[index].answerQuestionsInFirstMessage != value else { return }
+        prompts[index].answerQuestionsInFirstMessage = value
         save()
     }
 

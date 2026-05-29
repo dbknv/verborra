@@ -28,7 +28,7 @@ private final class DFMockStreamingService: StreamingFormattingServiceProtocol {
     var cancelStreamCalls: Int = 0
 
     // MARK: FormattingServiceProtocol
-    func format(text: String, systemPrompt: String, textLanguage: SupportedLanguage, model: LLMModel, vocabularyEntries: [VocabularyEntry], personalPreferences: String) async throws -> String {
+    func format(text: String, systemPrompt: String, textLanguage: SupportedLanguage, model: LLMModel) async throws -> String {
         formatCalls += 1
         return "formatted-fallback"
     }
@@ -38,9 +38,7 @@ private final class DFMockStreamingService: StreamingFormattingServiceProtocol {
         text: String,
         systemPrompt: String,
         textLanguage: SupportedLanguage,
-        model: LLMModel,
-        vocabularyEntries: [VocabularyEntry],
-        personalPreferences: String
+        model: LLMModel
     ) -> AsyncThrowingStream<String, Error> {
         streamFormatCalls.append((text, systemPrompt))
         let tokens = streamFormatTokens
@@ -73,7 +71,7 @@ private final class DFMockTranscriptionService: TranscriptionServiceProtocol {
 }
 
 private final class DFMockFormattingService: FormattingServiceProtocol {
-    func format(text: String, systemPrompt: String, textLanguage: SupportedLanguage, model: LLMModel, vocabularyEntries: [VocabularyEntry], personalPreferences: String) async throws -> String {
+    func format(text: String, systemPrompt: String, textLanguage: SupportedLanguage, model: LLMModel) async throws -> String {
         return "fallback-format"
     }
 }
@@ -248,7 +246,7 @@ final class DictationFlowTests: XCTestCase {
         // documents the exact contract the production path must satisfy.
         let composed = prompt.contentForLanguage(.en)
             + "\n\n"
-            + DoNotAnswerInstruction.text(for: .en)
+            + DoNotAnswerInstruction.text
         let asyncStream = stream.streamFormat(
             text: "anything",
             systemPrompt: composed,

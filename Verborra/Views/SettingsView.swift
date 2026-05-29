@@ -302,12 +302,20 @@ struct PromptsSettingsTab: View {
     @ViewBuilder
     private func answerInFirstMessageRow(isReadOnly: Bool) -> some View {
         HStack(alignment: .center, spacing: 6) {
+            // The toggle is editable for ALL prompts. The read-only guard on
+            // name/content (FR-009b) does not extend to this behavioural
+            // preference. Read-only prompts have no Save button, so we
+            // auto-persist on change here.
             Toggle(
                 l10n.string("settings.prompts.answerInFirstMessage.label"),
                 isOn: $viewModel.editingAnswerInFirstMessage
             )
             .toggleStyle(.checkbox)
-            .disabled(isReadOnly)
+            .onChange(of: viewModel.editingAnswerInFirstMessage) { _, _ in
+                if isReadOnly {
+                    viewModel.persistAnswerInFirstMessage()
+                }
+            }
 
             Button {
                 showAnswerInFirstMessageHelp.toggle()

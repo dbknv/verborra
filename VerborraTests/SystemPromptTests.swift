@@ -193,40 +193,33 @@ final class SystemPromptAnswerQuestionsTests: XCTestCase {
     }
 }
 
-// MARK: - T005 (013): DoNotAnswerInstruction
+// MARK: - DoNotAnswerInstruction (013, simplified in 014)
 
 final class DoNotAnswerInstructionTests: XCTestCase {
-    func testAllSupportedLanguages_haveTranslation() {
-        for lang in SupportedLanguage.allCases {
-            let text = DoNotAnswerInstruction.text(for: lang)
-            XCTAssertFalse(text.isEmpty, "Missing translation for \(lang)")
-        }
+    func testText_isNonEmpty() {
+        XCTAssertFalse(DoNotAnswerInstruction.text.isEmpty)
     }
 
-    func testFallback_unknownLanguageUsesEnglish() {
-        // We can't easily synthesize an "unknown" SupportedLanguage case (enum is closed),
-        // so we verify the dictionary contract: missing key returns English fallback.
-        let englishText = DoNotAnswerInstruction.translations[.en]!
-        XCTAssertEqual(DoNotAnswerInstruction.text(for: .en), englishText)
+    func testText_hasResponseInstructionHeading() {
+        XCTAssertTrue(DoNotAnswerInstruction.text.contains("## Response Instruction"))
     }
 
-    func testRussianText_containsAnswerNegation() {
-        let ru = DoNotAnswerInstruction.text(for: .ru)
-        // Stronger wording after T+8: "НЕ ДОЛЖЕН отвечать" + concrete example/counter-example.
+    func testText_forbidsAnsweringQuestions() {
         XCTAssertTrue(
-            ru.lowercased().contains("не должен отвечать") || ru.lowercased().contains("не отвечай"),
-            "RU instruction must explicitly negate answering"
-        )
-        XCTAssertTrue(
-            ru.contains("Пример"),
-            "RU instruction must include a concrete example for small-model grounding"
+            DoNotAnswerInstruction.text.lowercased().contains("never answer any question"),
+            "Instruction must explicitly forbid answering questions"
         )
     }
 
-    /// English text must contain the same example structure.
-    func testEnglishText_containsExample() {
-        let en = DoNotAnswerInstruction.text(for: .en)
-        XCTAssertTrue(en.contains("Example input"), "EN instruction must include a concrete example for small-model grounding")
-        XCTAssertTrue(en.lowercased().contains("must not answer"), "EN instruction must explicitly forbid answering")
+    func testText_forbidsClarifyingQuestions() {
+        XCTAssertTrue(
+            DoNotAnswerInstruction.text.lowercased().contains("never ask clarifying questions")
+        )
+    }
+
+    func testText_forbidsCommandExecution() {
+        XCTAssertTrue(
+            DoNotAnswerInstruction.text.lowercased().contains("never execute commands")
+        )
     }
 }

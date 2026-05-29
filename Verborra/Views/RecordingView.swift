@@ -27,8 +27,8 @@ struct RecordingView: View {
             }
         }
         .padding(.horizontal, 24)
-        .padding(.bottom, 24)
-        .padding(.top, 8)
+        .padding(.bottom, 8)
+        .padding(.top, 6)
     }
 
     // MARK: - States
@@ -74,11 +74,12 @@ struct RecordingView: View {
     private func recordingView(duration: TimeInterval, remaining: TimeInterval) -> some View {
         let isWarning = remaining <= 30 && remaining > 0
 
-        return VStack(spacing: 12) {
+        return VStack(spacing: 2) {
             AudioWaveformView(audioLevel: viewModel.audioLevel)
+                .frame(height: 110)
 
             Text(formatRemaining(remaining))
-                .font(.system(.title2, design: .monospaced))
+                .font(.system(.body, design: .monospaced))
                 .foregroundStyle(isWarning ? Color(hex: 0xD94040) : Color(hex: 0x9A9A9A))
 
         }

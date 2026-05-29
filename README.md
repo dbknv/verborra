@@ -1,6 +1,6 @@
 # Verborra
 
-![Verborra](media/verborra-main.png)
+![Verborra demo](media/verborra-demo.gif)
 
 Voice text input for macOS. Press a global hotkey, speak, get clean Markdown-formatted text inserted into the focused app.
 
@@ -17,12 +17,11 @@ Voice text input for macOS. Press a global hotkey, speak, get clean Markdown-for
 
 The whole loop is designed to feel like Alfred / Raycast: instant, transient, never in your way. The app lives in the menu bar (no Dock icon).
 
-![Verborra demo](media/verborra-demo.gif)
 
 ## Features
 
 - **Global hotkey** — configurable, recordable from the settings UI (powered by [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts)).
-- **OpenAI STT + LLM formatting** — pick your transcription model (`gpt-4o-mini-transcribe`, `gpt-4o-transcribe`, `whisper-1`) and formatting model (`gpt-4.1-nano`, `gpt-4o-mini`, `gpt-4.1-mini`, `gpt-5-nano`).
+- **OpenAI STT + LLM formatting** — pick your transcription model (`gpt-4o-mini-transcribe`, `gpt-4o-transcribe`, `whisper-1`) and formatting model. Twelve LLM options across the GPT-5.5 / GPT-5.4 / GPT-5 / GPT-4.1 / GPT-4o families, with input/output pricing shown inline next to each option in Settings → LLM. Default is `gpt-5.1`.
 - **Named system prompts** — keep multiple prompts (one is the default), switch between them in the overlay; switching re-runs the formatting pass on the same audio. Each prompt has a per-prompt **"Answer questions in the first message?"** toggle: off (the default) makes the model format your dictation and stay silent on questions inside it; on lets the first voice message become a chat exchange that you can then continue in the result window.
 - **WYSIWYG Markdown editor** in the overlay — real-time formatting while you edit.
 - **Vocabularies** — teach the app proper spellings of names, products, jargon and their phonetic alt-spellings (so "git hub" gets recognized as "GitHub").

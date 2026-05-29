@@ -13,7 +13,10 @@ struct TokenEstimator {
         switch model {
         case .gpt4oMini:
             return 128_000
-        case .gpt41Nano, .gpt41Mini, .gpt5Nano, .gpt5Mini, .gpt51, .gpt52, .gpt53:
+        case .gpt41Mini,
+             .gpt5Nano, .gpt5Mini, .gpt51, .gpt52,
+             .gpt54Nano, .gpt54Mini, .gpt54, .gpt54Pro,
+             .gpt55, .gpt55Pro:
             return 1_048_576
         }
     }

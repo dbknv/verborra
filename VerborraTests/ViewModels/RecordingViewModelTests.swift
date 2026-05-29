@@ -56,11 +56,13 @@ final class MockFormattingService: FormattingServiceProtocol {
     var shouldThrow = false
     var lastModel: LLMModel?
     var lastTextLanguage: SupportedLanguage?
+    var lastSystemPrompt: String?
 
     func format(text: String, systemPrompt: String, textLanguage: SupportedLanguage, model: LLMModel) async throws -> String {
         if shouldThrow { throw RecordingError.formattingFailed("Mock error") }
         lastModel = model
         lastTextLanguage = textLanguage
+        lastSystemPrompt = systemPrompt
         return mockResult
     }
 }

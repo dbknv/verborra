@@ -148,13 +148,25 @@ final class SettingsViewModel {
     func saveCurrentPrompt() {
         guard let id = selectedPromptID,
               var prompt = promptsStore.prompts.first(where: { $0.id == id }) else { return }
-        // FR-009b: read-only prompts (currently only simple-voice-to-text) cannot be edited.
+        // FR-009b: read-only prompts (currently only simple-voice-to-text) cannot have
+        // their name/content edited. The answer-toggle is still user-settable on
+        // them — handled via `persistAnswerInFirstMessage()` (auto-saved on change
+        // from the UI, since the read-only branch hides the Save button).
         guard !prompt.isReadOnly else { return }
 
         prompt.name = editingPromptName
         prompt.content = editingPromptContent
         prompt.answerQuestionsInFirstMessage = editingAnswerInFirstMessage
         promptsStore.updatePrompt(prompt)
+    }
+
+    /// Persists the current value of `editingAnswerInFirstMessage` to the
+    /// selected prompt, bypassing the read-only guard. Called from the
+    /// settings UI on toggle change so that built-in prompts (which have no
+    /// Save button) still pick up the change. No-op if the value is unchanged.
+    func persistAnswerInFirstMessage() {
+        guard let id = selectedPromptID else { return }
+        promptsStore.setAnswerInFirstMessage(promptID: id, value: editingAnswerInFirstMessage)
     }
 
     func deletePrompt(_ id: UUID) {

@@ -11,6 +11,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 —
 
+## [1.3.0] - 2026-05-29
+
+Model catalog refresh, the "Answer questions" toggle that finally works on the built-in prompt, and visible OpenAI error messages.
+
+### Added
+
+- Six new LLM models: **GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.4 Pro, GPT-5.4 Mini, GPT-5.4 Nano**. Pricing per 1M tokens shown inline in Settings → LLM.
+- OpenAI error messages now appear in the diagnostic log on every non-200 response, so "why did this model return 400?" is answerable from the log alone.
+
+### Changed
+
+- **Default LLM is now GPT-5.1** (was GPT-4.1 Nano). Existing installs keep their selection.
+- **Built-in prompt renamed** to **"Speech To Text"** (es/fr/pt/it adjusted to the Speech-side noun; ru/de/zh/ja/ko already aligned).
+- **"Answer questions in the first message?" toggle now works on every prompt**, including the built-in one — previously it was disabled in Settings and reset to off on every launch.
+- **Mid-chat language switch now affects continuation replies** — previously it only affected the next first-turn dictation.
+
+### Fixed
+
+- **GPT-5 Nano / GPT-5 Mini now work** — the request was sending an unsupported `temperature` parameter. The key is now omitted for reasoning-tier models (`gpt-5-nano`, `gpt-5-mini`, `gpt-5.4-nano`, `gpt-5.4-mini`); other models keep `temperature: 0.2`.
+- **"Answer questions" toggle actually changes the response** — a residual response-language directive was still instructing the model to echo the input verbatim. With the toggle on, the model now produces a substantive answer; with it off, the existing dictation behaviour is preserved.
+
+### Removed
+
+- **`gpt-4.1-nano`** — OpenAI deprecated.
+- **`gpt-5.3`** — never existed at OpenAI (returned 404).
+
+Existing installs with either selected fall back silently to the new default on next launch.
+
+### Migration
+
+- One-time prompts-schema bump v3 → v4 on first launch re-syncs system prompt names from the registry (this is how the "Speech To Text" rename reaches existing installs). No user data is lost.
+
 ## [1.2.0] - 2026-05-28
 
 Dictation flow rework: per-prompt control over question-answering on the first voice message, simplified default prompt, and chat continuation that finally behaves like a real chat.

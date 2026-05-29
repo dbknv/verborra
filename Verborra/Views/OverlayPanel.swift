@@ -6,7 +6,7 @@ import SwiftUI
 final class OverlayPanel: NSPanel {
     private var hostingView: NSHostingView<AnyView>?
 
-    static let initialSize = NSSize(width: 800, height: 250)
+    static let initialSize = NSSize(width: 800, height: 220)
 
     init() {
         super.init(
@@ -52,8 +52,8 @@ final class OverlayPanel: NSPanel {
 
         // Center horizontally
         var x = visibleFrame.origin.x + (visibleFrame.width - panelSize.width) / 2
-        // 10% from bottom of visible area (FR-002)
-        var y = visibleFrame.origin.y + visibleFrame.height * 0.05
+        // 2% from bottom of visible area
+        var y = visibleFrame.origin.y + visibleFrame.height * 0.02
 
         // Clamp to visible frame
         x = max(visibleFrame.origin.x, min(x, visibleFrame.maxX - panelSize.width))

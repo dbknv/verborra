@@ -253,6 +253,8 @@ Use with `get-library-docs` tool or ask: *"Find Node.js v24 documentation via co
 - JSON files in `~/Library/Application Support/Verborra/` (vocabularies.json); UserDefaults / @AppStorage (personal preferences text) (012-vocabularies)
 - Swift 5.9+ (Xcode 15+) + SwiftUI, AppKit (NSPanel, NSAlert), AVFoundation (AVAudioEngine — уже используется), swift-markdown (4.0+ — уже используется для рендеринга), KeyboardShortcuts (sindresorhus — уже используется), swift-atomics (1.2+ — уже используется в стриминге) (013-dictation-flow-rework)
 - JSON файл `~/Library/Application Support/Verborra/system_prompts.json` (через существующий `PromptsStore`); UserDefaults для `promptsDataVersion` (013-dictation-flow-rework)
+- Swift 5.9+ (Xcode 15+) + SwiftUI, AppKit (NSPanel), AVFoundation (AVAudioEngine), swift-markdown (4.0+), KeyboardShortcuts (sindresorhus), swift-atomics (1.2+) — all already in the project; no additions. (014-voice-level-and-language)
+- UserDefaults / `@AppStorage` (Settings default for response language — existing `AppSettings.globalTextLanguage`). The floating-window override is in-memory only on `RecordingViewModel`. The new structured language-resolution event is logged via the existing JSONL diagnostic logging system (spec 007, `~/Library/Application Support/Verborra/Logs/`). (014-voice-level-and-language)
 
 ## Recent Changes
 - 001-voice-input: Added SwiftUI, AppKit (NSPanel), AVFoundation (AVAudioEngine), Security (Keychain), ServiceManagement (SMAppService), swift-markdown (swiftlang), KeyboardShortcuts (sindresorhus)

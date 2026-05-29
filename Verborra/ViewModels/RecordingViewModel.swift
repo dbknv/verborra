@@ -16,6 +16,12 @@ final class RecordingViewModel {
     /// dispatched to the LLM. Reset on new session / overlay re-show. Used to gate
     /// `DoNotAnswerInstruction` injection — applies ONLY to that first turn.
     private var didConsumeFirstVoiceTurn: Bool = false
+    /// Snapshot of `settings.globalTextLanguage` captured at `showOverlay()`,
+    /// cleared at `cleanup()`. Lets the first-voice-turn diagnostic event
+    /// (014, FR-022) classify the override source: `settings-default` when the
+    /// floating-window picker still matches this snapshot at submission time,
+    /// `user-changed` otherwise. In-memory only; never persisted.
+    private var initialTextLanguageOnOpen: SupportedLanguage?
     var chatSession: ChatSession?
     var inputText: String = ""
     var copyConfirmation: Bool = false
@@ -48,6 +54,10 @@ final class RecordingViewModel {
 
     // MARK: - Logging (T031, T036)
     private let logUserAction = DiagnosticLogger.logger(for: .userAction)
+    /// API-category logger used for prompt-assembly diagnostics, sitting
+    /// alongside the events emitted by `ChatSession.prepareMessagesForLLM`
+    /// and `FormattingService` (014, FR-022).
+    private let logApi = DiagnosticLogger.logger(for: .api)
     private(set) var currentFlowId: UUID?
 
     init(
@@ -168,10 +178,18 @@ final class RecordingViewModel {
 
     func changeVoiceLanguage(_ language: SupportedLanguage) {
         selectedVoiceLanguage = language
+        // Mirror into the active session so chat continuation reflects the
+        // change. `session.voiceLanguage` is captured at init time only.
+        chatSession?.voiceLanguage = language
     }
 
     func changeTextLanguage(_ language: SupportedLanguage) {
         selectedTextLanguage = language
+        // Mirror into the active session so chat-continuation prompt
+        // assembly (`ChatSession.prepareMessagesForLLM`) uses the new
+        // target language for `TranslateToTargetInstruction` instead of
+        // the one captured at session creation.
+        chatSession?.textLanguage = language
     }
 
     func cycleVoiceLanguage() {
@@ -485,6 +503,10 @@ final class RecordingViewModel {
         )
         // FR-013: every new session restarts the first-voice-turn gate.
         didConsumeFirstVoiceTurn = false
+        // 014 FR-013: snapshot the Settings default at window-open so the
+        // first-voice-turn diagnostic event (FR-022) can classify the
+        // override source. Reset on cleanup() — see ephemeral lifecycle.
+        initialTextLanguageOnOpen = settings.globalTextLanguage
 
         targetAppTracker.startTracking()
 
@@ -605,26 +627,40 @@ final class RecordingViewModel {
                 // before the await so the consumption is atomic with respect to
                 // subsequent voice recordings in this session.
                 let isFirstVoiceTurn = !didConsumeFirstVoiceTurn
-                let basePromptForFirstTurn = selectedPrompt.contentForLanguage(selectedTextLanguage)
                 let shouldInjectDoNotAnswer = isFirstVoiceTurn && !selectedPrompt.answerQuestionsInFirstMessage
-                // Compose the full system prompt: PromptEnhancer adds Response
-                // Language / Personal Preferences / Vocabulary first, then we
-                // append the DoNotAnswerInstruction LAST so the model sees it as
-                // the highest-priority directive (small models like gpt-4.1-nano
-                // weight later instructions more strongly).
-                let enhancedSystemPrompt: String = {
-                    let enhanced = PromptEnhancer().enhance(
-                        basePrompt: basePromptForFirstTurn,
-                        textLanguage: selectedTextLanguage,
-                        vocabularyEntries: vocabularyStore.entries,
-                        personalPreferences: settings.personalPreferencesText
-                    )
-                    if shouldInjectDoNotAnswer {
-                        return enhanced + "\n\n## Critical Instruction\n\n"
-                            + DoNotAnswerInstruction.text(for: selectedVoiceLanguage)
+                let shouldInjectAnswerQuestion = isFirstVoiceTurn && selectedPrompt.answerQuestionsInFirstMessage
+                // 014: single canonical assembly via SystemPromptBuilder. Base
+                // prompt is taken from the English locale; output language is
+                // enforced by Translate Response Language Override at the end
+                // of the prompt.
+                let enhancedSystemPrompt = SystemPromptBuilder.build(.init(
+                    basePrompt: selectedPrompt.contentForLanguage(.en),
+                    targetLanguage: selectedTextLanguage,
+                    personalPreferences: settings.personalPreferencesText,
+                    vocabularyEntries: vocabularyStore.entries,
+                    injectDoNotAnswer: shouldInjectDoNotAnswer,
+                    injectAnswerQuestion: shouldInjectAnswerQuestion
+                ))
+                // 014 FR-022: emit one structured diagnostic event per first
+                // voice turn of a chat session, BEFORE the LLM network call so a
+                // failed call still produces the event for triage.
+                if isFirstVoiceTurn {
+                    let overrideSource: String
+                    if let initial = initialTextLanguageOnOpen, initial != selectedTextLanguage {
+                        overrideSource = "user-changed"
+                    } else {
+                        overrideSource = "settings-default"
                     }
-                    return enhanced
-                }()
+                    logApi.info(
+                        "Language resolution for first voice turn",
+                        metadata: [
+                            "resolvedTargetLanguage": selectedTextLanguage.rawValue,
+                            "directiveInjected": "true",
+                            "overrideSource": overrideSource,
+                            "isFirstVoiceTurn": "true"
+                        ]
+                    )
+                }
                 didConsumeFirstVoiceTurn = true
 
                 let firstTurnMessages: [(role: String, content: String)] = [
@@ -644,18 +680,13 @@ final class RecordingViewModel {
                             chatSession?.updateLastAssistantContent(accumulated)
                         }
                     } catch {
-                        // Fallback to non-streaming on SSE error — use the same
-                        // composed system prompt.
+                        // Fallback to non-streaming on SSE error. The service
+                        // accepts the already-assembled prompt as-is.
                         let formattedText = try await formattingService.format(
                             text: rawText,
-                            systemPrompt: basePromptForFirstTurn
-                                + (shouldInjectDoNotAnswer
-                                    ? "\n\n## Critical Instruction\n\n" + DoNotAnswerInstruction.text(for: selectedVoiceLanguage)
-                                    : ""),
+                            systemPrompt: enhancedSystemPrompt,
                             textLanguage: selectedTextLanguage,
-                            model: settings.selectedLLMModel,
-                            vocabularyEntries: vocabularyStore.entries,
-                            personalPreferences: settings.personalPreferencesText
+                            model: settings.selectedLLMModel
                         )
                         chatSession?.updateLastAssistantContent(formattedText)
                     }
@@ -714,6 +745,10 @@ final class RecordingViewModel {
         stopInputTimers()
         audioCaptureService.resetRecording()
         streamingService?.cancelStream()
+        // 014 FR-015: discard the floating-window override snapshot on close
+        // so the next showOverlay() re-initializes from the (possibly
+        // updated) Settings default.
+        initialTextLanguageOnOpen = nil
     }
 
     func copyMarkdown() {
@@ -899,15 +934,23 @@ final class RecordingViewModel {
                     let assistantMessage = ChatMessage(role: .assistant, content: "", isStreaming: true)
                     chatSession?.addMessage(assistantMessage)
 
+                    // 014: assemble once via SystemPromptBuilder. This path is a
+                    // continuation/post-processing turn — no DoNotAnswer.
+                    let inputSystemPrompt = SystemPromptBuilder.build(.init(
+                        basePrompt: selectedPrompt.contentForLanguage(.en),
+                        targetLanguage: selectedTextLanguage,
+                        personalPreferences: settings.personalPreferencesText,
+                        vocabularyEntries: vocabularyStore.entries,
+                        injectDoNotAnswer: false
+                    ))
+
                     if let streaming = streamingService {
                         do {
                             let stream = streaming.streamFormat(
                                 text: rawText,
-                                systemPrompt: selectedPrompt.contentForLanguage(selectedTextLanguage),
+                                systemPrompt: inputSystemPrompt,
                                 textLanguage: selectedTextLanguage,
-                                model: settings.selectedLLMModel,
-                                vocabularyEntries: vocabularyStore.entries,
-                                personalPreferences: settings.personalPreferencesText
+                                model: settings.selectedLLMModel
                             )
                             var accumulated = ""
                             for try await token in stream {
@@ -915,25 +958,21 @@ final class RecordingViewModel {
                                 chatSession?.updateLastAssistantContent(accumulated)
                             }
                         } catch {
-                            // Fallback to non-streaming on SSE error
+                            // Fallback to non-streaming on SSE error.
                             let formattedText = try await formattingService.format(
                                 text: rawText,
-                                systemPrompt: selectedPrompt.contentForLanguage(selectedTextLanguage),
+                                systemPrompt: inputSystemPrompt,
                                 textLanguage: selectedTextLanguage,
-                                model: settings.selectedLLMModel,
-                                vocabularyEntries: vocabularyStore.entries,
-                                personalPreferences: settings.personalPreferencesText
+                                model: settings.selectedLLMModel
                             )
                             chatSession?.updateLastAssistantContent(formattedText)
                         }
                     } else {
                         let formattedText = try await formattingService.format(
                             text: rawText,
-                            systemPrompt: selectedPrompt.contentForLanguage(selectedTextLanguage),
+                            systemPrompt: inputSystemPrompt,
                             textLanguage: selectedTextLanguage,
-                            model: settings.selectedLLMModel,
-                            vocabularyEntries: vocabularyStore.entries,
-                            personalPreferences: settings.personalPreferencesText
+                            model: settings.selectedLLMModel
                         )
                         chatSession?.updateLastAssistantContent(formattedText)
                     }

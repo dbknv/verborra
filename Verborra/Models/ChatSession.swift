@@ -90,17 +90,24 @@ final class ChatSession: ChatSessionProtocol {
         // asking for more formatting. Keep only a minimal chat-mode system
         // message with the response-language directive so the assistant
         // doesn't switch languages.
+        // 014: first voice turn → canonical dictation prompt assembly via
+        // SystemPromptBuilder (mirrors the live `RecordingViewModel` path).
+        // Continuation → minimal chat-mode system message with response-language
+        // override appended so the assistant doesn't switch languages.
         let systemContent: String
         if isFirstVoiceTurn {
-            let basePrompt = systemPrompt.contentForLanguage(voiceLanguage)
-            var content = basePrompt
-            if !answerQuestionsInFirstMessage {
-                content += "\n\n" + DoNotAnswerInstruction.text(for: voiceLanguage)
-            }
-            content += "\n\nЯзык ответа: \(textLanguage.displayName)"
-            systemContent = content
+            systemContent = SystemPromptBuilder.build(.init(
+                basePrompt: systemPrompt.contentForLanguage(.en),
+                targetLanguage: textLanguage,
+                injectDoNotAnswer: !answerQuestionsInFirstMessage,
+                injectAnswerQuestion: answerQuestionsInFirstMessage
+            ))
         } else {
-            systemContent = "You are a helpful assistant. Respond in \(textLanguage.displayName)."
+            // Continuation: the model is producing its own response, not
+            // echoing the input — use the answer-mode directive so it isn't
+            // told to "return only the translation".
+            systemContent = "You are a helpful assistant.\n\n"
+                + TranslateToTargetInstruction.text(for: textLanguage, allowAnswering: true)
         }
         var result: [(role: String, content: String)] = [("system", systemContent)]
 

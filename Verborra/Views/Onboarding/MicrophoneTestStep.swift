@@ -18,7 +18,7 @@ struct MicrophoneTestStep: View {
                 .multilineTextAlignment(.center)
 
             AudioWaveformView(audioLevel: viewModel.audioLevel)
-                .frame(height: 60)
+                .frame(height: 120)
                 .padding(.horizontal, 40)
 
             if viewModel.audioLevel > 0.05 {
@@ -27,7 +27,6 @@ struct MicrophoneTestStep: View {
             } else {
                 Text(l10n.string("onboarding.micTest.speakNow"))
                     .foregroundStyle(.secondary)
-                    .font(.caption)
             }
 
             Spacer()
