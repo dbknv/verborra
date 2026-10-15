@@ -82,6 +82,21 @@ struct AdvancedSettingsTab: View {
                     }
                 }
             }
+
+            #if DEBUG
+            // MARK: - Developer Section (spec 015, FR-045; Debug builds only)
+            Section(l10n.string("settings.advanced.developer")) {
+                VStack(alignment: .leading, spacing: 4) {
+                    // Quickstart 2.6: the watchdog must log a WARN for this stall
+                    Button(l10n.string("settings.advanced.simulateStall")) {
+                        Thread.sleep(forTimeInterval: 3)
+                    }
+                    Text(l10n.string("settings.advanced.simulateStallHint"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            #endif
         }
         .formStyle(.grouped)
     }

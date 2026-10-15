@@ -4,19 +4,11 @@ import SwiftUI
 
 struct OverlayContentView: View {
     @Bindable var viewModel: RecordingViewModel
-    @State private var keyMonitor: Any?
 
     private let permissionManager = PermissionManager.shared
 
     var body: some View {
         VStack(spacing: 0) {
-            // Prompt selector (preProcessing only)
-            if viewModel.windowPhase == .preProcessing {
-                PromptSelectorView(viewModel: viewModel)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-            }
-
             // Content area
             Group {
                 if permissionManager.microphoneStatus != .granted {
@@ -90,17 +82,10 @@ struct OverlayContentView: View {
         }
         .onAppear {
             permissionManager.startMonitoring()
-            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                viewModel.handleKeyDown(event) ? nil : event
-            }
         }
         .onDisappear {
             viewModel.cleanup()  // T025: FR-020 — stop timers and recording
             permissionManager.stopMonitoring()
-            if let keyMonitor {
-                NSEvent.removeMonitor(keyMonitor)
-            }
-            keyMonitor = nil
         }
     }
 }

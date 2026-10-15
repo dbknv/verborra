@@ -65,7 +65,7 @@ final class StreamingFormattingService: StreamingFormattingServiceProtocol {
         // `SystemPromptBuilder`). The service does NOT enhance it further.
         let messages: [(role: String, content: String)] = [
             ("system", systemPrompt),
-            ("user", text),
+            ("user", text)
         ]
         return streamChat(messages: messages, model: model)
     }
@@ -91,15 +91,7 @@ final class StreamingFormattingService: StreamingFormattingServiceProtocol {
                         "model": model.rawValue,
                         "messageCount": "\(messages.count)"
                     ])
-                    // DEBUG — детали запроса
-                    self.log.debug("Streaming request details", metadata: [
-                        "headers": SensitiveMasker.maskHeaders(request.allHTTPHeaderFields ?? [:]).description,
-                        "model": model.rawValue,
-                        "temperature": model.supportsTemperature ? "0.2" : "omitted",
-                        "maxTokens": "4000",
-                        "systemPrompt": String((messages.first(where: { $0.role == "system" })?.content ?? "").prefix(4000)),
-                        "userText": String((messages.last(where: { $0.role == "user" })?.content ?? "").prefix(500))
-                    ])
+                    self.logRequestDetails(request, messages: messages, model: model)
 
                     let requestStart = Date()
                     let (bytes, response) = try await self.session.bytes(for: request)
@@ -108,36 +100,8 @@ final class StreamingFormattingService: StreamingFormattingServiceProtocol {
                         throw RecordingError.formattingFailed("Invalid response")
                     }
 
-                    switch httpResponse.statusCode {
-                    case 200:
-                        break
-                    case 401:
-                        // Drain a small slice of the body to log the auth error message — useful
-                        // to distinguish "invalid key", "key revoked", "org not allowed" etc.
-                        let body = await Self.collectBody(bytes, cap: 2000)
-                        self.log.error(
-                            "Streaming API auth failed",
-                            parameters: ["body": body],
-                            errorCode: "401"
-                        )
-                        throw RecordingError.apiKeyNotConfigured
-                    default:
-                        // Drain the response body so OpenAI's actual error message is captured
-                        // in the diagnostic log (e.g. "Unsupported value: 'temperature' does
-                        // not support 0.2 with this model. Only the default (1) value is
-                        // supported."). Without this the log only shows the HTTP status code,
-                        // which is insufficient to root-cause 400/404/422 model-config errors.
-                        let body = await Self.collectBody(bytes, cap: 4000)
-                        self.log.error(
-                            "Streaming API error",
-                            parameters: [
-                                "status": "\(httpResponse.statusCode)",
-                                "model": model.rawValue,
-                                "body": body
-                            ],
-                            errorCode: "\(httpResponse.statusCode)"
-                        )
-                        throw RecordingError.formattingFailed("Server error \(httpResponse.statusCode): \(String(body.prefix(500)))")
+                    if httpResponse.statusCode != 200 {
+                        throw await self.failure(status: httpResponse.statusCode, bytes: bytes, model: model)
                     }
 
                     var accumulated = ""
@@ -172,10 +136,8 @@ final class StreamingFormattingService: StreamingFormattingServiceProtocol {
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
-                } catch let error as URLError where error.code == .notConnectedToInternet || error.code == .networkConnectionLost {
-                    continuation.finish(throwing: RecordingError.networkUnavailable)
                 } catch {
-                    continuation.finish(throwing: error)
+                    continuation.finish(throwing: Self.mapNetworkError(error))
                 }
             }
 
@@ -194,7 +156,8 @@ final class StreamingFormattingService: StreamingFormattingServiceProtocol {
 
     // MARK: - Private
 
-    private func buildRequest(messages: [(role: String, content: String)], model: LLMModel) throws -> URLRequest {
+    /// Internal (not private) so tests can check the request shape (spec 015, T022).
+    func buildRequest(messages: [(role: String, content: String)], model: LLMModel) throws -> URLRequest {
         let apiKey = apiKeyProvider()
         guard !apiKey.isEmpty else {
             throw RecordingError.apiKeyNotConfigured
@@ -202,17 +165,20 @@ final class StreamingFormattingService: StreamingFormattingServiceProtocol {
 
         let messagePayload = messages.map { ["role": $0.role, "content": $0.content] }
 
-        // GPT-5 reasoning models (`gpt-5-nano`, `gpt-5-mini`) reject any
-        // `temperature` other than the default `1` with a 400; omit the key
-        // entirely for them. See `LLMModel.supportsTemperature`.
+        // `temperature` and `reasoning_effort` are set per exact model — see the
+        // tables in `LLMModel.supportsTemperature` / `LLMModel.reasoningEffort`.
+        // The shape matches `FormattingService.format` apart from `stream`.
         var requestBody: [String: Any] = [
             "model": model.rawValue,
             "messages": messagePayload,
             "max_completion_tokens": 4000,
-            "stream": true,
+            "stream": true
         ]
         if model.supportsTemperature {
             requestBody["temperature"] = 0.2
+        }
+        if let effort = model.reasoningEffort {
+            requestBody["reasoning_effort"] = effort.rawValue
         }
 
         var request = URLRequest(url: URL(string: baseURL)!)
@@ -231,6 +197,68 @@ final class StreamingFormattingService: StreamingFormattingServiceProtocol {
     /// Silently truncates at the cap to avoid flooding the log on a runaway
     /// payload; failures while reading are swallowed and the partial body is
     /// returned (a partial error message is more useful than nothing).
+    /// Lost or missing connectivity becomes `.networkUnavailable`; other errors pass through.
+    private static func mapNetworkError(_ error: Error) -> Error {
+        guard let urlError = error as? URLError,
+              [.notConnectedToInternet, .networkConnectionLost].contains(urlError.code) else { return error }
+        return RecordingError.networkUnavailable
+    }
+
+    /// DEBUG — детали запроса
+    private func logRequestDetails(_ request: URLRequest, messages: [(role: String, content: String)], model: LLMModel) {
+        log.debug("Streaming request details", metadata: [
+            "headers": SensitiveMasker.maskHeaders(request.allHTTPHeaderFields ?? [:]).description,
+            "model": model.rawValue,
+            "temperature": model.supportsTemperature ? "0.2" : "omitted",
+            "reasoningEffort": model.reasoningEffort?.rawValue ?? "omitted",
+            "maxTokens": "4000",
+            "systemPrompt": String((messages.first(where: { $0.role == "system" })?.content ?? "").prefix(4000)),
+            "userText": String((messages.last(where: { $0.role == "user" })?.content ?? "").prefix(500))
+        ])
+    }
+
+    /// Maps a non-200 response to the error to throw, logging OpenAI's message from the body.
+    private func failure(status: Int, bytes: URLSession.AsyncBytes, model: LLMModel) async -> Error {
+        if status == 401 {
+            // Drain a small slice of the body to log the auth error message — useful
+            // to distinguish "invalid key", "key revoked", "org not allowed" etc.
+            let body = await Self.collectBody(bytes, cap: 2000)
+            log.error("Streaming API auth failed", parameters: ["body": body], errorCode: "401")
+            return RecordingError.apiKeyNotConfigured
+        }
+        // Drain the response body so OpenAI's actual error message is captured
+        // in the diagnostic log (e.g. "Unsupported value: 'temperature' does
+        // not support 0.2 with this model. Only the default (1) value is
+        // supported."). Without this the log only shows the HTTP status code,
+        // which is insufficient to root-cause 400/404/422 model-config errors.
+        let body = await Self.collectBody(bytes, cap: 4000)
+        // spec 015 (FR-040): the model isn't available — say so, never fall back to another model
+        if RecordingError.isModelUnavailable(status: status, body: body) {
+            let openAIError = RecordingError.openAIError(in: body)
+            log.error(
+                "Model unavailable",
+                parameters: [
+                    "method": "streamFormat",
+                    "model": model.rawValue,
+                    "status": "\(status)",
+                    "message": String((openAIError.message ?? body).prefix(500))
+                ],
+                errorCode: openAIError.code ?? "\(status)"
+            )
+            return RecordingError.modelUnavailable(modelName: model.displayName, kind: .text)
+        }
+        log.error(
+            "Streaming API error",
+            parameters: [
+                "status": "\(status)",
+                "model": model.rawValue,
+                "body": body
+            ],
+            errorCode: "\(status)"
+        )
+        return RecordingError.formattingFailed("Server error \(status): \(String(body.prefix(500)))")
+    }
+
     private static func collectBody(_ bytes: URLSession.AsyncBytes, cap: Int) async -> String {
         var data = Data()
         data.reserveCapacity(min(cap, 4096))

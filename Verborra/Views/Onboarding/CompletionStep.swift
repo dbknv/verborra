@@ -1,4 +1,3 @@
-import KeyboardShortcuts
 import SwiftUI
 
 struct CompletionStep: View {
@@ -22,14 +21,13 @@ struct CompletionStep: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleOverlay) {
-                Text(shortcut.description)
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary))
-            }
+            // spec 015 (FR-028): includes 🌐︎ for Fn shortcuts
+            Text(ShortcutFormatter.string(GlobalShortcutStore.shared.current))
+                .font(.title2)
+                .fontWeight(.semibold)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary))
 
             // API Key section
             VStack(spacing: 8) {
@@ -61,6 +59,19 @@ struct CompletionStep: View {
                 }
             }
             .padding(.top, 4)
+
+            // spec 015 (FR-005): asked once, applied when the user finishes onboarding
+            if viewModel.asksLaunchAtLogin {
+                VStack(spacing: 4) {
+                    Toggle(l10n.string("onboarding.completion.launchAtLogin"), isOn: $viewModel.launchAtLoginChoice)
+                        .toggleStyle(.checkbox)
+                    if let error = viewModel.launchAtLoginError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
 
             Text(l10n.string("onboarding.completion.skipHint"))
                 .font(.caption)

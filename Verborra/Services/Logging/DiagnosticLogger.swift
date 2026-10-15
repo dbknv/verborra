@@ -8,6 +8,15 @@ protocol AppStateProvider: AnyObject, Sendable {
     func currentAppState() -> AppState
 }
 
+// MARK: - LogFilterSnapshot (spec 015, T006)
+
+/// Снимок настроек фильтрации, безопасный для чтения с любого потока.
+/// Обновляется на главном потоке при смене уровня логирования и состояния записи.
+struct LogFilterSnapshot: Sendable, Equatable {
+    var level: LogLevel
+    var isRecordingActive: Bool
+}
+
 // MARK: - DiagnosticLogger (T013, T015)
 
 /// Dual-sink фасад: os.Logger + JSONLFileWriter (FR-004).
@@ -26,6 +35,23 @@ final class DiagnosticLogger: @unchecked Sendable {
     /// Отложенное переключение в OFF при активной записи (T051).
     /// Если true — OFF откладывается до завершения.
     static var isRecordingActiveProvider: (() -> Bool) = { false }
+
+    /// Потокобезопасный снимок для `shouldLog` (spec 015, T006). Провайдеры выше читают
+    /// main-actor-состояние, поэтому вызывать их с watchdog/event-tap/audio-потоков нельзя.
+    static let filterSnapshot = OSAllocatedUnfairLock(
+        initialState: LogFilterSnapshot(level: .info, isRecordingActive: false)
+    )
+
+    /// Перехватчик записей для тестов. В приложении всегда `nil`.
+    static let testEntrySink = OSAllocatedUnfairLock<(@Sendable (LogEntry) -> Void)?>(initialState: nil)
+
+    static func updateFilterSnapshot(level: LogLevel) {
+        filterSnapshot.withLock { $0.level = level }
+    }
+
+    static func updateFilterSnapshot(isRecordingActive: Bool) {
+        filterSnapshot.withLock { $0.isRecordingActive = isRecordingActive }
+    }
 
     private let category: LogCategory
     private let osLogger: os.Logger
@@ -55,7 +81,7 @@ final class DiagnosticLogger: @unchecked Sendable {
             metadata: metadata
         )
         osLogger.info("\(message, privacy: .public)")
-        JSONLFileWriter.shared.write(entry: entry)
+        write(entry)
     }
 
     /// Логирует DEBUG-сообщение (FR-003).
@@ -69,7 +95,7 @@ final class DiagnosticLogger: @unchecked Sendable {
             metadata: metadata
         )
         osLogger.debug("\(message, privacy: .public)")
-        JSONLFileWriter.shared.write(entry: entry)
+        write(entry)
     }
 
     /// Логирует ERROR-сообщение с полным контекстом (FR-010).
@@ -94,7 +120,8 @@ final class DiagnosticLogger: @unchecked Sendable {
             method: method,
             parameters: parameters,
             errorCode: errorCode,
-            state: Self.appStateProvider?.currentAppState(),
+            // appStateProvider читает main-actor-состояние — вне главного потока не трогаем.
+            state: Thread.isMainThread ? Self.appStateProvider?.currentAppState() : nil,
             breadcrumbs: breadcrumbs
         )
 
@@ -107,20 +134,42 @@ final class DiagnosticLogger: @unchecked Sendable {
         )
 
         osLogger.error("\(message, privacy: .public)")
-        JSONLFileWriter.shared.write(entry: entry)
+        write(entry)
+    }
+
+    /// Логирует WARN-сообщение (spec 015, research R12). Пишется тогда же, когда ERROR,
+    /// но без контекста состояния приложения — безопасно вызывать с любого потока.
+    func warn(_ message: String, metadata: [String: String]? = nil) {
+        guard shouldLog(level: .error) else { return }
+        let entry = LogEntry(
+            severityLabel: "WARN",
+            category: category,
+            sessionId: Self.sessionId,
+            message: message,
+            metadata: metadata
+        )
+        osLogger.error("\(message, privacy: .public)")
+        write(entry)
     }
 
     // MARK: - Private
 
+    private func write(_ entry: LogEntry) {
+        if let sink = Self.testEntrySink.withLock({ $0 }) {
+            sink(entry)
+        }
+        JSONLFileWriter.shared.write(entry: entry)
+    }
+
     private func shouldLog(level: LogLevel) -> Bool {
-        let activeLevel = Self.logLevelProvider()
+        let snapshot = Self.filterSnapshot.withLock { $0 }
 
         // T051: Отложенное переключение в OFF при активной записи
-        if activeLevel == .off && Self.isRecordingActiveProvider() {
+        if snapshot.level == .off && snapshot.isRecordingActive {
             // Во время записи не отключаем — пишем как минимум ERROR
             return level == .error
         }
 
-        return level.shouldLog(at: activeLevel)
+        return level.shouldLog(at: snapshot.level)
     }
 }

@@ -113,3 +113,28 @@ struct MigrationPrompt: Codable {
     var isSystem: Bool?
     var systemId: String?
 }
+
+// MARK: - Prompt name limit (spec 015, US10, research R32)
+
+extension SystemPrompt {
+    /// Maximum prompt name length in user-visible characters (`String.count`, grapheme clusters).
+    static let maxNameLength = 30
+}
+
+/// Rules for prompt names typed in Settings and shown in the floating window (data-model §7).
+enum PromptNameRule {
+    /// Typing or pasting past the limit keeps the first 30 characters. A name that was already
+    /// longer (saved before the limit existed) is left as is, so opening it never cuts it silently.
+    static func clamp(new: String, old: String) -> String {
+        guard new.count > SystemPrompt.maxNameLength, old.count <= SystemPrompt.maxNameLength else {
+            return new
+        }
+        return String(new.prefix(SystemPrompt.maxNameLength))
+    }
+
+    /// Floating-window title: unchanged up to 30 characters, otherwise the first 29 plus "…".
+    static func display(_ name: String) -> String {
+        guard name.count > SystemPrompt.maxNameLength else { return name }
+        return String(name.prefix(SystemPrompt.maxNameLength - 1)) + "…"
+    }
+}

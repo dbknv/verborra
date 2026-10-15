@@ -251,7 +251,7 @@ final class DictationFlowTests: XCTestCase {
             text: "anything",
             systemPrompt: composed,
             textLanguage: .en,
-            model: .gpt41Nano,
+            model: .gpt52,
             vocabularyEntries: [],
             personalPreferences: ""
         )

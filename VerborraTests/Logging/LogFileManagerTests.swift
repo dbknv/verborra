@@ -42,7 +42,13 @@ struct LogFileManagerTests {
 
         // Create a fake old file
         let oldFile = dir.appendingPathComponent("verborra-2020-01-01T00.jsonl")
-        FileManager.default.createFile(atPath: oldFile.path, contents: "test".data(using: .utf8))
+        FileManager.default.createFile(atPath: oldFile.path, contents: Data("test".utf8))
+        defer { try? FileManager.default.removeItem(at: oldFile) }
+        // Cleanup goes by creation date, not by file name
+        try FileManager.default.setAttributes(
+            [.creationDate: Date(timeIntervalSinceNow: -2 * 3600)],
+            ofItemAtPath: oldFile.path
+        )
 
         manager.cleanupOldLogs(retentionHours: 1)
 

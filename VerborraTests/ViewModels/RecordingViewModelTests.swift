@@ -3,40 +3,6 @@ import XCTest
 
 // MARK: - Mock Services
 
-final class MockAudioCaptureService: AudioCaptureServiceProtocol {
-    var audioLevel: Float = 0.0
-    var currentDuration: TimeInterval = 0.0
-    var onAutoStop: (@Sendable @MainActor () -> Void)?
-    var onDeviceError: (@Sendable @MainActor (_ deviceName: String?, _ reason: DeviceErrorReason) -> Void)?
-    var isRecording = false
-    var shouldThrow = false
-    var mockAudioData = Data([0x52, 0x49, 0x46, 0x46])  // "RIFF"
-    var lastDeviceID: String?
-    var lastMaxDuration: MaxRecordingDuration?
-
-    func startRecording(deviceID: String?, maxDuration: MaxRecordingDuration) async throws {
-        if shouldThrow { throw RecordingError.microphoneNotAvailable }
-        lastDeviceID = deviceID
-        lastMaxDuration = maxDuration
-        isRecording = true
-    }
-
-    func stopRecording() async throws -> Data {
-        isRecording = false
-        return mockAudioData
-    }
-
-    func resetRecording() {
-        isRecording = false
-    }
-
-    func updateLevelsFromAtomic() {}
-
-    func availableInputDevices() -> [(id: String, name: String)] {
-        return [("1", "Built-in Microphone")]
-    }
-}
-
 final class MockTranscriptionService: TranscriptionServiceProtocol {
     var mockResult = "Привет мир"
     var shouldThrow = false
@@ -92,6 +58,7 @@ final class MockPasteService: PasteServiceProtocol {
 
 // MARK: - RecordingViewModelTests
 
+@MainActor
 final class RecordingViewModelTests: XCTestCase {
     var viewModel: RecordingViewModel!
     var mockAudio: MockAudioCaptureService!
@@ -102,6 +69,7 @@ final class RecordingViewModelTests: XCTestCase {
     override func setUp() {
         super.setUp()
         mockAudio = MockAudioCaptureService()
+        mockAudio.mockAudioData = Data([0x52, 0x49, 0x46, 0x46])  // "RIFF"
         mockTranscription = MockTranscriptionService()
         mockFormatting = MockFormattingService()
         mockPaste = MockPasteService()
@@ -133,8 +101,22 @@ final class RecordingViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.chatSession)
     }
 
-    func testStartRecording() {
+    /// `startRecording()` starts its work in a Task; wait for it to land.
+    private func waitUntil(timeout: TimeInterval = 2, _ condition: () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    private var isRecordingState: Bool {
+        if case .recording = viewModel.state { return true }
+        return false
+    }
+
+    func testStartRecording() async {
         viewModel.startRecording()
+        await waitUntil { isRecordingState }
         if case .recording = viewModel.state {
             // Expected
         } else {
@@ -170,9 +152,13 @@ final class RecordingViewModelTests: XCTestCase {
         XCTAssertFalse(mockAudio.isRecording)
     }
 
-    func testMicrophoneError() {
-        mockAudio.shouldThrow = true
+    func testMicrophoneError() async {
+        mockAudio.shouldThrowOnStart = true
         viewModel.startRecording()
+        await waitUntil {
+            if case .error = viewModel.state { return true }
+            return false
+        }
         XCTAssertEqual(viewModel.state, .error(.microphoneNotAvailable))
     }
 
@@ -209,8 +195,9 @@ final class RecordingViewModelTests: XCTestCase {
         XCTAssertTrue(handled)
     }
 
-    func testStartRecordingPassesSettings() {
+    func testStartRecordingPassesSettings() async {
         viewModel.startRecording()
+        await waitUntil { mockAudio.lastMaxDuration != nil }
         XCTAssertEqual(mockAudio.lastMaxDuration, viewModel.settings.maxRecordingDuration)
     }
 
@@ -235,8 +222,9 @@ final class RecordingViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.inputRecordingState, .idle)
     }
 
-    func testStopRecordingBlockedBeforeMinDuration() {
+    func testStopRecordingBlockedBeforeMinDuration() async {
         viewModel.startRecording()
+        await waitUntil { isRecordingState }
         // Immediately try to stop — duration < 2s
         viewModel.stopRecording()
         // Should still be recording since min 2s not reached
@@ -302,5 +290,107 @@ final class RecordingViewModelTests: XCTestCase {
         )!
         let handled = viewModel.handleKeyDown(event)
         XCTAssertTrue(handled)
+    }
+
+    // MARK: - Floating-window selections (spec 015, T062)
+
+    private func key(_ keyCode: UInt16, _ characters: String) -> NSEvent {
+        NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: 0, windowNumber: 0, context: nil,
+            characters: characters, charactersIgnoringModifiers: characters,
+            isARepeat: false, keyCode: keyCode
+        )!
+    }
+
+    func testCyclePromptWrapsAround() {
+        let store = viewModel.promptsStore
+        store.addPrompt(SystemPrompt(name: "Second", content: "b"))
+        store.addPrompt(SystemPrompt(name: "Third", content: "c"))
+        XCTAssertEqual(store.prompts.count, 3)
+        viewModel.changePrompt(store.prompts[0])
+
+        viewModel.cyclePrompt()
+        XCTAssertEqual(viewModel.selectedPrompt.id, store.prompts[1].id)
+        viewModel.cyclePrompt()
+        XCTAssertEqual(viewModel.selectedPrompt.id, store.prompts[2].id)
+        viewModel.cyclePrompt()
+        XCTAssertEqual(viewModel.selectedPrompt.id, store.prompts[0].id)
+    }
+
+    func testCyclePromptWithOnePromptIsNoOp() {
+        XCTAssertEqual(viewModel.promptsStore.prompts.count, 1)
+        let before = viewModel.selectedPrompt.id
+        viewModel.cyclePrompt()
+        XCTAssertEqual(viewModel.selectedPrompt.id, before)
+    }
+
+    func testCyclePromptFallsBackToDefaultWhenSelectedWasRemoved() {
+        viewModel.changePrompt(SystemPrompt(name: "Gone", content: "x"))
+        viewModel.cyclePrompt()
+        XCTAssertEqual(viewModel.selectedPrompt.id, viewModel.promptsStore.defaultPrompt.id)
+    }
+
+    func testNumberKeysWorkWhenIdle() {
+        viewModel.promptsStore.addPrompt(SystemPrompt(name: "Second", content: "b"))
+        viewModel.changePrompt(viewModel.promptsStore.prompts[0])
+        let language = viewModel.selectedTextLanguage
+
+        // spec 015 (R29): 1 microphone, 2 output language, 3 prompt
+        XCTAssertTrue(viewModel.handleKeyDown(key(19, "2")))
+        XCTAssertNotEqual(viewModel.selectedTextLanguage, language)
+        XCTAssertEqual(viewModel.selectedPrompt.name, viewModel.promptsStore.prompts[0].name, "2 doesn't touch the prompt")
+        XCTAssertTrue(viewModel.handleKeyDown(key(20, "3")))
+        XCTAssertEqual(viewModel.selectedPrompt.name, "Second")
+        XCTAssertTrue(viewModel.handleKeyDown(key(18, "1")))
+    }
+
+    func testNumberKeysWorkInErrorState() {
+        viewModel.state = .error(.silenceDetected)
+        XCTAssertTrue(viewModel.handleKeyDown(key(20, "3")))
+    }
+
+    func testNumberKeysWorkWhileRecording() {
+        viewModel.promptsStore.addPrompt(SystemPrompt(name: "Second", content: "b"))
+        viewModel.changePrompt(viewModel.promptsStore.prompts[0])
+        viewModel.state = .recording(duration: 1, remaining: 10)
+        XCTAssertTrue(viewModel.handleKeyDown(key(20, "3")))
+        XCTAssertEqual(viewModel.selectedPrompt.name, "Second")
+    }
+
+    func testNumberKeysIgnoredWhileStartingOrProcessing() {
+        viewModel.promptsStore.addPrompt(SystemPrompt(name: "Second", content: "b"))
+        let states: [RecordingState] = [.starting(attempt: 1), .transcribing, .formatting]
+        for state in states {
+            viewModel.state = state
+            let prompt = viewModel.selectedPrompt.id
+            let language = viewModel.selectedTextLanguage
+            XCTAssertFalse(viewModel.handleKeyDown(key(19, "2")), "\(state)")
+            XCTAssertFalse(viewModel.handleKeyDown(key(20, "3")), "\(state)")
+            XCTAssertFalse(viewModel.handleKeyDown(key(18, "1")), "\(state)")
+            XCTAssertEqual(viewModel.selectedPrompt.id, prompt)
+            XCTAssertEqual(viewModel.selectedTextLanguage, language)
+        }
+    }
+
+    func testNumberKeysIgnoredInPostProcessing() {
+        viewModel.windowPhase = .postProcessing
+        XCTAssertFalse(viewModel.handleKeyDown(key(19, "2")))
+        XCTAssertFalse(viewModel.handleKeyDown(key(20, "3")))
+    }
+
+    func testChangePromptMirrorsIntoChatSession() {
+        viewModel.chatSession = ChatSession(systemPrompt: viewModel.selectedPrompt, voiceLanguage: .en, textLanguage: .en)
+        let prompt = SystemPrompt(name: "Other", content: "o")
+        viewModel.changePrompt(prompt, source: .key)
+        XCTAssertEqual(viewModel.chatSession?.systemPrompt.id, prompt.id)
+    }
+
+    func testShowOverlayResetsPromptToDefault() {
+        viewModel.promptsStore.addPrompt(SystemPrompt(name: "Second", content: "b"))
+        viewModel.changePrompt(viewModel.promptsStore.prompts[1])
+        viewModel.showOverlay()
+        defer { viewModel.dismissOverlay() }
+        XCTAssertEqual(viewModel.selectedPrompt.id, viewModel.promptsStore.defaultPrompt.id)
     }
 }

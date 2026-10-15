@@ -23,6 +23,7 @@ final class TargetAppTrackerTests: XCTestCase {
         tracker.startTracking()
         // If there's a frontmost app that isn't us, PID should be set
         if let frontmost = NSWorkspace.shared.frontmostApplication,
+           frontmost.processIdentifier > 0,
            frontmost.bundleIdentifier != Bundle.main.bundleIdentifier {
             XCTAssertGreaterThan(tracker.targetPID, 0)
         }

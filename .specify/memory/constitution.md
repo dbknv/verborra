@@ -1,25 +1,8 @@
-<!--
-  Sync Impact Report
-  ==================
-  Version change: 1.3.0 → 1.3.1 (exception for debug WAV recording)
-  Modified principles:
-    - Principle 4: added exception — audio MAY be saved
-      to disk in WAV format for debugging purposes, if the user
-      has explicitly enabled the option in Advanced Settings (off by default)
-  Added sections: N/A
-  Removed sections: N/A
-  Templates requiring updates:
-    ✅ plan-template.md — compatible
-    ✅ spec-template.md — compatible
-    ✅ tasks-template.md — compatible
-  Follow-up TODOs: N/A
--->
-
 # Project Constitution: Speech-to-Text for macOS
 
-**Version**: 1.3.1
+**Version**: 2.0.2
 **Ratification date**: 2026-03-04
-**Last modified**: 2026-03-20
+**Last modified**: 2026-10-14
 
 ## Preamble
 
@@ -28,7 +11,7 @@ and constraints for the **Speech-to-Text** project — a desktop
 macOS application that allows the user to activate voice
 input via a global hotkey in any system text field and receive
 formatted text as output. Speech recognition is performed
-through the OpenAI Whisper API (ChatGPT API — voice-to-text),
+through the OpenAI Audio Transcriptions API (speech-to-text),
 text post-processing — through the OpenAI Chat Completions API.
 
 All architecture and implementation decisions MUST conform to
@@ -125,11 +108,39 @@ protection.
 - Network requests MUST use HTTPS (TLS 1.2+).
 - The application MUST NOT collect telemetry
   or analytics without the user's explicit consent.
-- App Sandbox MUST be enabled with the minimum
-  necessary entitlements.
+- The application runs **without App Sandbox**. Its core
+  functions are incompatible with the sandbox: the global hotkey
+  via an active CGEventTap (required for Fn/🌐︎ shortcuts),
+  CGEvent paste simulation into other applications, and the
+  Accessibility API. In its place the following are REQUIRED:
+  - Entitlements MUST be limited to the minimum the features
+    need (currently: audio input, app-scoped security bookmarks).
+    Every new entitlement MUST be justified in `research.md`
+    of the feature that introduces it.
+  - Release builds MUST be built with Hardened Runtime enabled.
+    The default signing is ad-hoc ("Sign to Run Locally"), because
+    the project has no paid Apple Developer team. Ad-hoc identity
+    changes with every build, so after an update macOS may ask
+    again for Accessibility and the login item may need
+    re-approval; the app MUST detect and show both states.
+    Signing with a stable team identity is RECOMMENDED when one
+    is available.
+  - Code that observes system input (event taps, key monitors)
+    MUST NOT log, store, or transmit keystrokes or characters;
+    it MAY log only that a configured shortcut fired and the
+    state of the observer itself.
+  - System-wide input observers MUST NOT run on the main thread,
+    so that a stalled UI cannot delay keyboard input for other
+    applications. "Observer" means a component that sees input
+    destined for other applications: active or listen-only event
+    taps (CGEventTap) and global NSEvent monitors. Registered
+    hotkeys (Carbon `RegisterEventHotKey`) receive only their own
+    key combination, and app-local key monitors see only the app's
+    own events; neither is an observer under this rule.
 
 **Rationale**: the application has access to the microphone
-and system input — user trust is critical.
+and system input — user trust is critical. Because the sandbox
+cannot be used, these compensating controls take its place.
 
 ---
 
@@ -144,7 +155,12 @@ The code MUST be testable and maintainable.
 - UI tests are NOT REQUIRED, but RECOMMENDED
   for critical user scenarios.
 - Every PR MUST pass linting (SwiftLint)
-  and build without warnings.
+  and build without warnings. Linting MUST cover at least
+  the files changed in the PR.
+- SwiftLint and similar tooling are **development-only**:
+  they are installed on the developer machine or in CI
+  (e.g. via Homebrew) and MUST NOT be added as a dependency,
+  build plugin, or bundled resource of the shipped application.
 - Code MUST follow the Swift API Design Guidelines.
 - API errors MUST be handled gracefully
   with clear messages for the user.
@@ -175,6 +191,11 @@ logging for debugging all aspects of operation.
     intermediate states, timings,
     full payload of API requests and responses
     (except confidential data).
+- In addition to the modes, log entries MAY carry the
+  **WARN** severity (degraded but non-failing conditions, e.g.
+  an unresponsive main thread). WARN entries MUST be written
+  whenever ERROR entries are written (ERROR, INFO, DEBUG modes)
+  and never in OFF. WARN does not add a fifth mode.
 - Errors (ERROR) MUST be logged at the
   ERROR, INFO, and DEBUG levels. In OFF mode, logging
   is fully disabled, including errors.
@@ -263,15 +284,15 @@ without requiring real-time reproduction.
 | Target OS               | macOS 15 (Sequoia), macOS 26 (Tahoe) and higher |
 | Dependency management   | Swift Package Manager                   |
 | Audio capture           | AVFoundation (AVAudioEngine)            |
-| Speech-to-Text API      | OpenAI Whisper API                      |
+| Speech-to-Text API      | OpenAI Audio Transcriptions API         |
 | Text formatting         | OpenAI Chat Completions API             |
 | Settings storage        | UserDefaults / @AppStorage              |
 | Secrets storage         | macOS Keychain (Security framework)     |
-| Global hotkey           | CGEvent / Carbon (RegisterEventHotKey)  |
+| Global hotkey           | Carbon (RegisterEventHotKey); CGEventTap for Fn shortcuts |
 | Architecture            | MVVM + Observation framework            |
 | Logging                 | os.Logger (Unified Logging) + file      |
 | Testing                 | XCTest / Swift Testing                  |
-| Linting                 | SwiftLint                               |
+| Linting                 | SwiftLint (development-only, not shipped) |
 | CI/CD                   | Xcode Cloud or GitHub Actions           |
 
 ---

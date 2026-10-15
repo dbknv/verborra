@@ -140,18 +140,24 @@ struct LLMSettingsTab: View {
     }
 
     private func modelInfoPopover(models: [(name: String, description: String)]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(models, id: \.name) { model in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.name)
-                        .font(.headline)
-                    Text(model.description)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+        // spec 015 (FR-031): 10 text models don't fit — scroll
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(models, id: \.name) { model in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.name)
+                            .font(.headline)
+                        Text(model.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(12)
         .frame(width: 280)
+        .frame(maxHeight: 420)
     }
 }

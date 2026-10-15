@@ -51,13 +51,9 @@ final class SPSCRingBufferTests: XCTestCase {
 
     func testSequentialCycle() {
         let buffer = SPSCRingBuffer<Int>(capacity: 256)
-        for i in 0..<256 {
-            if buffer.write(i) {
-                // drain periodically to avoid full
-                if i % 64 == 63 {
-                    _ = buffer.readAll()
-                }
-            }
+        // drain periodically to avoid full
+        for i in 0..<256 where buffer.write(i) && i % 64 == 63 {
+            _ = buffer.readAll()
         }
         _ = buffer.readAll()
         XCTAssertTrue(buffer.isEmpty)
@@ -66,8 +62,8 @@ final class SPSCRingBufferTests: XCTestCase {
     func testCount() {
         let buffer = SPSCRingBuffer<Int>(capacity: 8)
         XCTAssertEqual(buffer.count, 0)
-        buffer.write(1)
-        buffer.write(2)
+        _ = buffer.write(1)
+        _ = buffer.write(2)
         XCTAssertEqual(buffer.count, 2)
         _ = buffer.read()
         XCTAssertEqual(buffer.count, 1)

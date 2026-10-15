@@ -3,6 +3,7 @@ import XCTest
 
 // MARK: - SettingsViewModelTests
 
+@MainActor
 final class SettingsViewModelTests: XCTestCase {
     var viewModel: SettingsViewModel!
     var mockKeychain: MockKeychainService!
@@ -13,7 +14,21 @@ final class SettingsViewModelTests: XCTestCase {
         let settings = AppSettings(keychainService: mockKeychain)
         let promptsStore = PromptsStore(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent("test-prompts-\(UUID().uuidString).json"))
 
-        viewModel = SettingsViewModel(settings: settings, promptsStore: promptsStore)
+        let vocabularyStore = VocabularyStore(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent("test-vocabularies-\(UUID().uuidString).json"))
+        let deviceProvider = MockAudioDeviceProvider()
+        deviceProvider.mockDevices = [
+            AudioDevice(uid: "BuiltInMicUID", name: "MacBook Pro Microphone",
+                        audioDeviceID: 100, transportType: .builtIn, isSystemDefault: true)
+        ]
+        deviceProvider.mockDefaultUID = "BuiltInMicUID"
+        let audioDeviceManager = AudioDeviceManager(provider: deviceProvider, settings: settings)
+
+        viewModel = SettingsViewModel(
+            settings: settings,
+            promptsStore: promptsStore,
+            vocabularyStore: vocabularyStore,
+            audioDeviceManager: audioDeviceManager
+        )
     }
 
     func testInitialApiKeyEmpty() {
@@ -39,7 +54,6 @@ final class SettingsViewModelTests: XCTestCase {
     }
 
     func testDefaultSettings() {
-        XCTAssertTrue(viewModel.settings.launchAtLogin)
         XCTAssertTrue(viewModel.settings.autoRecord)
     }
 
@@ -95,8 +109,8 @@ final class SettingsViewModelTests: XCTestCase {
     }
 
     func testDefaultModelSettings() {
-        XCTAssertEqual(viewModel.settings.selectedSTTModel, .gpt4oMiniTranscribe)
-        XCTAssertEqual(viewModel.settings.selectedLLMModel, .gpt41Nano)
+        XCTAssertEqual(viewModel.settings.selectedSTTModel, .gptTranscribe)
+        XCTAssertEqual(viewModel.settings.selectedLLMModel, .gpt6Luna)
     }
 
     // MARK: - T050: System prompt protection in ViewModel

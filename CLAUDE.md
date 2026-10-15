@@ -42,6 +42,7 @@ constitution → specify → [clarify] → plan → [checklist] → tasks → [a
 - JSON файл `~/Library/Application Support/Verborra/system_prompts.json` (через существующий `PromptsStore`); UserDefaults для `promptsDataVersion` (013-dictation-flow-rework)
 - Swift 5.9+ (Xcode 15+) + SwiftUI, AppKit (NSPanel), AVFoundation (AVAudioEngine), swift-markdown (4.0+), KeyboardShortcuts (sindresorhus), swift-atomics (1.2+) — all already in the project; no additions. (014-voice-level-and-language)
 - UserDefaults / `@AppStorage` (Settings default for response language — existing `AppSettings.globalTextLanguage`). The floating-window override is in-memory only on `RecordingViewModel`. The new structured language-resolution event is logged via the existing JSONL diagnostic logging system (spec 007, `~/Library/Application Support/Verborra/Logs/`). (014-voice-level-and-language)
+- Swift 5.9+ + ServiceManagement (SMAppService status), CoreGraphics CGEventTap (Fn hotkey, background thread), Carbon (RegisterEventHotKey/CopySymbolicHotKeys), one Objective-C NSException shim; storage UserDefaults (`globalShortcut.v1`, `launchAtLogin` intent, `selectedSTTModelRawValue`/`selectedLLMModelRawValue`); OpenAI model catalog with per-model request options (no new dependencies) (015-reliability-shortcuts-models)
 
 ## Recent Changes
 - 001-voice-input: Added SwiftUI, AppKit (NSPanel), AVFoundation (AVAudioEngine), Security (Keychain), ServiceManagement (SMAppService), swift-markdown (swiftlang), KeyboardShortcuts (sindresorhus)

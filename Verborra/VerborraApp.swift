@@ -21,6 +21,8 @@ struct VerborraApp: App {
                 .environment(appDelegate.vocabularyStore)
                 .environment(LocalizationManager.shared)
                 .environment(appDelegate.appController?.audioDeviceManager)
+                .environment(appDelegate.loginItemService)
+                .environment(appDelegate.hotkeyService)
                 .onDisappear {
                     NSApp.setActivationPolicy(.accessory)
                 }
@@ -36,7 +38,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let promptsStore = PromptsStore()
     let vocabularyStore = VocabularyStore()
     private(set) var appController: AppController?
+    /// spec 015 (US1): the only owner of SMAppService calls.
+    private(set) lazy var loginItemService = LoginItemService(intentStore: appSettings)
+    /// spec 015 (US3): created here, not in AppController, so the Settings scene (built before
+    /// `applicationDidFinishLaunching`) gets a non-nil service for the shortcut recorder.
+    let hotkeyService = GlobalHotkeyService()
     private var onboardingViewModel: OnboardingViewModel?
+    private let mainThreadWatchdog = MainThreadWatchdog()
     private var onboardingWindow: OnboardingWindow?
     private let lifecycleLog = DiagnosticLogger.logger(for: .lifecycle)
 
@@ -46,10 +54,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Lifecycle (T016, T017, T064)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // spec 015 (R11): log uncaught exceptions in all builds; crash on them in DEBUG only
+        NSSetUncaughtExceptionHandler { exception in
+            DiagnosticLogger.logger(for: .lifecycle).error(
+                "Uncaught exception",
+                parameters: [
+                    "name": exception.name.rawValue,
+                    "reason": exception.reason ?? "",
+                    "thread": Thread.isMainThread ? "main" : "background",
+                    "callStack": exception.callStackSymbols.prefix(20).joined(separator: "\n")
+                ]
+            )
+            JSONLFileWriter.shared.flushSync()
+        }
+        #if DEBUG
+        UserDefaults.standard.register(defaults: ["NSApplicationCrashOnExceptions": true])
+        #endif
+
         // T016: Инициализация системы логирования
         DiagnosticLogger.logLevelProvider = { [weak self] in
             self?.appSettings.logLevel ?? .info
         }
+        DiagnosticLogger.updateFilterSnapshot(level: appSettings.logLevel)
         JSONLFileWriter.shared.start()
         LogFileManager.shared.cleanupOldLogs(retentionHours: appSettings.logRetentionHours)
 
@@ -58,7 +84,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "logLevel": appSettings.logLevel.displayName
         ])
 
-        appController = AppController(settings: appSettings, promptsStore: promptsStore, vocabularyStore: vocabularyStore)
+        // spec 015 (US2, FR-011): report main-thread stalls longer than 2 s
+        mainThreadWatchdog.start()
+
+        // spec 015 (US3): the old in-window recording key is gone
+        UserDefaults.standard.removeObject(forKey: "recordingKeyCode")
+        UserDefaults.standard.removeObject(forKey: "recordingModifiers")
+
+        // spec 015 (US7): move users off removed models before anything reads the model settings
+        ModelSelectionMigrator.run()
+
+        // spec 015 (US1): keep the login item in line with the user's choice (contracts/login-item.md)
+        loginItemService.reconcileAtLaunch(onboardingCompleted: appSettings.isOnboardingCompleted)
+
+        appController = AppController(
+            settings: appSettings,
+            promptsStore: promptsStore,
+            vocabularyStore: vocabularyStore,
+            hotkeyService: hotkeyService
+        )
         showOnboardingIfNeeded()
 
         NotificationCenter.default.addObserver(
@@ -82,6 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // T064
     func applicationDidBecomeActive(_ notification: Notification) {
         lifecycleLog.info("Application did become active")
+        loginItemService.refresh()
     }
 
     func applicationDidResignActive(_ notification: Notification) {
@@ -106,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showOnboardingIfNeeded() {
         if onboardingViewModel == nil {
-            onboardingViewModel = OnboardingViewModel(appSettings: appSettings)
+            onboardingViewModel = OnboardingViewModel(appSettings: appSettings, loginItemService: loginItemService)
         }
         // T010 [US1]: If microphone not granted, show onboarding regardless of isOnboardingCompleted (FR-001, FR-002)
         let needsMicrophone = PermissionManager.shared.microphoneStatus != .granted
@@ -132,11 +177,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 final class AppController {
     let recordingViewModel: RecordingViewModel
     let audioDeviceManager: AudioDeviceManager
-    private let hotkeyService: HotkeyService
+    /// spec 015 (US3): Carbon or Fn event tap, depending on the shortcut.
+    let hotkeyService: GlobalHotkeyService
 
     let vocabularyStore: VocabularyStore
 
-    init(settings: AppSettings, promptsStore: PromptsStore, vocabularyStore: VocabularyStore) {
+    init(
+        settings: AppSettings,
+        promptsStore: PromptsStore,
+        vocabularyStore: VocabularyStore,
+        hotkeyService: GlobalHotkeyService
+    ) {
         self.vocabularyStore = vocabularyStore
         let audioCaptureService = AudioCaptureService()
         let transcriptionService = TranscriptionService(apiKeyProvider: { settings.apiKey })
@@ -163,13 +214,13 @@ final class AppController {
         )
 
         self.recordingViewModel = recordingVM
-        self.hotkeyService = HotkeyService()
+        self.hotkeyService = hotkeyService
 
         let targetTracker = recordingVM.targetAppTracker
         let pasteService = PasteService(targetPIDProvider: { targetTracker.targetPID })
         recordingVM.updatePasteService(pasteService)
 
-        hotkeyService.startListening { [weak recordingVM] in
+        hotkeyService.start { [weak recordingVM] in
             recordingVM?.toggleOverlay()
         }
     }
@@ -184,6 +235,7 @@ struct MenuBarView: View {
 
     var body: some View {
         // Capture openSettings for programmatic use from outside SwiftUI
+        // swiftlint:disable:next redundant_discardable_let - `let _` is required inside a view builder
         let _ = AppDelegate.openSettingsAction = { [openSettings] in openSettings() }
 
         Button(l10n.string("menu.settings")) {

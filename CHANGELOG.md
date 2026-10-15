@@ -9,7 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-—
+## [1.4.0] - 2026-10-15
+
+Reliability fixes, a new shortcut recorder with Fn support, a reworked floating window, and an updated OpenAI model list.
+
+### Added
+
+- **New text models**: GPT-5.6 Terra, GPT-5.6 Sol, GPT-6 Luna, GPT-6 Sol, GPT-6.1 Sol and GPT-6 Astra, with prices in Settings → LLM (the list scrolls).
+- **GPT Transcribe** is the new speech-to-text model.
+- **Fn / 🌐︎ shortcuts** — e.g. `🌐︎ Space` (needs Accessibility access).
+- **New shortcut recorder** — shows held modifiers as you press them, saves on the first key, and explains why a shortcut can't be used (taken by macOS, another app, or the Verborra window).
+- **Launch at login** is asked once at the end of onboarding; Settings shows "needs approval" with an **Open Login Items** button when macOS requires it.
+- A clear message when your OpenAI account can't use the selected model.
+- Each bottom-bar menu starts with a title: **Input device**, **Output language**, **Using prompt**.
+- Prompt names have a 30-character counter in Settings; older longer names are kept but must be shortened before saving.
+
+### Changed
+
+- **Defaults are now GPT Transcribe and GPT-6 Luna.** If you used a model that was removed — or never changed the old default — Verborra switches you to the new default automatically.
+- **Floating window**: the prompt menu moved to the bottom bar. Order and keys are **1** microphone, **2** output language, **3** prompt; they work before and during recording. The prompt button is as wide as its name, without ever crowding Start/Stop and Exit.
+- Starting the microphone shows "Starting microphone…" and can be cancelled with the shortcut, Esc or the Cancel button. If it can't start, you get a Retry button within 5 seconds instead of a frozen app.
+- Verborra no longer switches silently to the system default microphone when your selected one fails.
+
+### Removed
+
+- Models retired by OpenAI: GPT-4o Mini, GPT-4.1 Mini, GPT-5 Nano, GPT-5 Mini, GPT-5.1, GPT-5.4 Nano, GPT-4o Mini Transcribe, GPT-4o Transcribe, Whisper-1.
+- GPT-5.4 Pro and GPT-5.5 Pro (they need an OpenAI API that Verborra doesn't use).
+
+### Fixed
+
+- **Launch at login**: the Settings toggle now shows the real macOS state and offers **Open Login Items** when approval is needed (for example after installing a new ad-hoc-signed build).
+- **The app could freeze when recording started** (for example after a microphone sample-rate change or with an unplugged USB mic).
+- **Overlay keys (1, 2, 3, Esc…) were captured while typing in Settings.**
+- Requests that OpenAI rejected (e.g. an unsupported model setting) were retried three times before the error showed.
+- A fresh install had no default prompt marked.
+- **Switching microphones during a recording failed** for every microphone except System Default; switching now retries like a normal start and shows "Switching to …".
+- **Closing the window during a microphone switch could turn the microphone on afterwards.**
 
 ## [1.3.0] - 2026-05-29
 
@@ -135,6 +170,8 @@ First public release. A complete, native macOS voice-input tool: global hotkey �
 - No telemetry. Network calls go only to the OpenAI API using the user-provided key.
 - Built with Swift 5.9+, SwiftUI, AppKit, AVFoundation, CoreAudio.
 
-[Unreleased]: https://github.com/dbknv/verborra/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/dbknv/verborra/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/dbknv/verborra/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/dbknv/verborra/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/dbknv/verborra/compare/v1.0.0...v1.2.0
 [1.0.0]: https://github.com/dbknv/verborra/releases/tag/v1.0.0

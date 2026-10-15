@@ -8,8 +8,23 @@ import SwiftUI
 final class RecordingViewModel {
     // MARK: - State
 
-    var state: RecordingState = .idle
-    var windowPhase: WindowPhase = .preProcessing
+    var state: RecordingState = .idle {
+        didSet {
+            if case .recording = state {
+                DiagnosticLogger.updateFilterSnapshot(isRecordingActive: true)
+            } else {
+                DiagnosticLogger.updateFilterSnapshot(isRecordingActive: false)
+            }
+            MainThreadWatchdog.setStage(Self.watchdogStage(for: state))
+        }
+    }
+    var windowPhase: WindowPhase = .preProcessing {
+        didSet {
+            if windowPhase == .postProcessing {
+                MainThreadWatchdog.setStage("postProcessing")
+            }
+        }
+    }
     var inputRecordingState: InputRecordingState = .idle
     var audioLevel: Float = 0.0
     /// `true` after the first voice-transcribed turn of the current session has been
@@ -50,6 +65,25 @@ final class RecordingViewModel {
     private var durationTimer: Timer?
     private var levelTimer: Timer?
     private var recordingStart: Date?
+
+    // spec 015 (US2): start orchestration
+    private var startTask: Task<Void, Never>?
+    private var startBeganAt: ContinuousClock.Instant?
+    /// spec 015 (US9): what the current or last `.starting` is for (research R31).
+    private(set) var startKind: StartKind = .initial
+    /// Kind of the last start that finished; `.switching` after a failed switch lets a pick start again (FR-053).
+    private(set) var lastStartKind: StartKind = .initial
+    /// Display name of the microphone the current start targets (for `.recordingStartFailed`).
+    private var startDeviceName = "System Default"
+    /// Microphone a switch started from (event E16).
+    private var switchFromName = "System Default"
+    /// Bluetooth device prepared by the current start; returned to A2DP on cancel or failure (FR-055).
+    private var preparedBluetoothDevice: AudioDevice?
+    private let overallStartBudget: Duration
+    private let attemptSetupTimeout: Duration
+    private let retrySetupTimeout: Duration
+    private let firstBufferTimeout: Duration
+    private let logAudio = DiagnosticLogger.logger(for: .audio)
     private var savedAudioData: Data?
 
     // MARK: - Logging (T031, T036)
@@ -70,8 +104,16 @@ final class RecordingViewModel {
         vocabularyStore: VocabularyStore = VocabularyStore(),
         audioDeviceManager: AudioDeviceManager,
         processingRouter: ProcessingRouter? = nil,
-        streamingService: StreamingFormattingServiceProtocol? = nil
+        streamingService: StreamingFormattingServiceProtocol? = nil,
+        overallStartBudget: Duration = .seconds(5),
+        attemptSetupTimeout: Duration = .milliseconds(1800),
+        retrySetupTimeout: Duration = .milliseconds(2400),
+        firstBufferTimeout: Duration = .milliseconds(600)
     ) {
+        self.overallStartBudget = overallStartBudget
+        self.attemptSetupTimeout = attemptSetupTimeout
+        self.retrySetupTimeout = retrySetupTimeout
+        self.firstBufferTimeout = firstBufferTimeout
         self.vocabularyStore = vocabularyStore
         self.audioCaptureService = audioCaptureService
         self.transcriptionService = transcriptionService
@@ -142,13 +184,7 @@ final class RecordingViewModel {
             // (handled by switchAudioDevice flow)
         }
 
-        self.audioCaptureService.onDeviceFallback = { @Sendable [weak self] fallbackDeviceName in
-            guard let self else { return }
-            // Engine failed on selected device — switch to System Default via standard flow
-            self.switchAudioDevice(to: "")
-        }
-
-        self.audioDeviceManager.onBluetoothSwitchError = { [weak self] message in
+        self.audioDeviceManager.onBluetoothSwitchError = { [weak self] _ in
             guard let self else { return }
             self.state = .error(.deviceUnavailable)
         }
@@ -172,8 +208,35 @@ final class RecordingViewModel {
 
     // MARK: - Prompt & Language Changes
 
-    func changePrompt(_ prompt: SystemPrompt) {
+    /// Where a selection change came from, for the `.userAction` log (spec 015, FR-029).
+    enum SelectionChangeSource: String {
+        case menu
+        case key
+    }
+
+    func changePrompt(_ prompt: SystemPrompt, source: SelectionChangeSource = .menu) {
+        let old = selectedPrompt
         selectedPrompt = prompt
+        // Mirror into the active session, like the language changes below
+        chatSession?.systemPrompt = prompt
+        logUserAction.info("Prompt changed", metadata: [
+            "from": old.name,
+            "to": prompt.name,
+            "source": source.rawValue
+        ])
+    }
+
+    /// Key 2: next prompt, wrapping around (contracts/floating-window-keys.md).
+    func cyclePrompt() {
+        let prompts = promptsStore.prompts
+        guard !prompts.isEmpty else { return }
+        guard let index = prompts.firstIndex(where: { $0.id == selectedPrompt.id }) else {
+            changePrompt(promptsStore.defaultPrompt, source: .key)
+            return
+        }
+        let next = prompts[(index + 1) % prompts.count]
+        guard next.id != selectedPrompt.id else { return }
+        changePrompt(next, source: .key)
     }
 
     func changeVoiceLanguage(_ language: SupportedLanguage) {
@@ -183,8 +246,14 @@ final class RecordingViewModel {
         chatSession?.voiceLanguage = language
     }
 
-    func changeTextLanguage(_ language: SupportedLanguage) {
+    func changeTextLanguage(_ language: SupportedLanguage, source: SelectionChangeSource = .menu) {
+        let old = selectedTextLanguage
         selectedTextLanguage = language
+        logUserAction.info("Text language changed", metadata: [
+            "from": old.rawValue,
+            "to": language.rawValue,
+            "source": source.rawValue
+        ])
         // Mirror into the active session so chat-continuation prompt
         // assembly (`ChatSession.prepareMessagesForLLM`) uses the new
         // target language for `TranslateToTargetInstruction` instead of
@@ -203,7 +272,7 @@ final class RecordingViewModel {
         let all = SupportedLanguage.allCases
         guard let index = all.firstIndex(of: selectedTextLanguage) else { return }
         let next = all[(index + 1) % all.count]
-        changeTextLanguage(next)
+        changeTextLanguage(next, source: .key)
     }
 
     func cycleMicrophone() {
@@ -216,19 +285,31 @@ final class RecordingViewModel {
         } else {
             newUID = devices.count > 1 ? devices[1].uid : devices[0].uid
         }
-        switchAudioDevice(to: newUID)
+        switchAudioDevice(to: newUID, source: .key)
     }
 
-    /// Active device switch task — cancelled on rapid re-switch (T021).
-    private var switchTask: Task<Void, Never>?
+    /// Number keys work in the pre-recording phase while idle, recording or showing an error, the same
+    /// states in which the bottom-bar menus are enabled (AS 4.7). Auto-record users are always recording here.
+    private var canCycleSelections: Bool {
+        guard windowPhase == .preProcessing else { return false }
+        switch state {
+        case .idle, .recording, .error: return true
+        case .starting, .transcribing, .formatting: return false
+        }
+    }
 
     /// Switch audio device by UID. Empty string = System Default.
-    func switchAudioDevice(to deviceUID: String) {
+    /// While recording (or after a failed switch) this starts a switch through the start path (research R31):
+    /// `.starting`, retry, one 5 s budget, cancel on close/hotkey. Otherwise only the selection changes.
+    func switchAudioDevice(to deviceUID: String, source: SelectionChangeSource = .menu) {
         guard deviceUID != audioDeviceManager.selectedDevice?.uid else { return }
+        let previousName = audioDeviceManager.selectedDevice?.name ?? "System Default"
+        logUserAction.info("Microphone changed", metadata: [
+            "from": previousName,
+            "to": audioDeviceManager.devices.first(where: { $0.uid == deviceUID })?.name ?? "System Default",
+            "source": source.rawValue
+        ])
 
-        // T021/T023: Cancel previous in-flight switch
-        switchTask?.cancel()
-        switchTask = nil
         audioDeviceManager.bluetoothProfileManager.cancelPreparation()
 
         // T018: If switching FROM Bluetooth device, restore A2DP on old device
@@ -241,39 +322,21 @@ final class RecordingViewModel {
         // FR-006: Session-only switch — does NOT change settings default
         audioDeviceManager.selectDeviceForSession(uid: deviceUID)
         selectedAudioDeviceID = deviceUID.isEmpty ? nil : deviceUID
+        let newName = audioDeviceManager.selectedDevice?.name ?? "System Default"
 
-        // If recording is active, restart with the new device
-        if case .recording = state {
-            switchTask = Task { @MainActor in
-                audioCaptureService.resetRecording()
-                guard !Task.isCancelled else { return }
-                do {
-                    // All BT devices need stabilization — rate can be stale
-                    var needsBTSwitch = false
-                    if let newDevice = audioDeviceManager.selectedDevice,
-                       newDevice.transportType.isBluetooth,
-                       !newDevice.isSystemDefaultEntry {
-                        let _ = await audioDeviceManager.bluetoothProfileManager
-                            .prepareForRecording(device: newDevice, context: .deviceSwitch)
-                        needsBTSwitch = true
-                    }
-
-                    let captureDeviceID = resolveDeviceIDForCapture(uid: deviceUID)
-                    syncAudioSaveSettings()
-                    try await audioCaptureService.startRecording(
-                        deviceID: captureDeviceID,
-                        maxDuration: settings.maxRecordingDuration,
-                        awaitBluetoothSwitch: needsBTSwitch
-                    )
-                    guard !Task.isCancelled else { return }
-                    recordingStart = Date()
-                    let maxSeconds = settings.maxRecordingDuration.timeInterval
-                    state = .recording(duration: 0, remaining: maxSeconds)
-                } catch {
-                    guard !Task.isCancelled else { return }
-                    state = .error(mapError(error))
-                }
-            }
+        switch state {
+        case .recording:
+            // Audio recorded so far is discarded; recording restarts on the new microphone (Clarifications)
+            stopTimers()
+            audioCaptureService.resetRecording()
+            switchFromName = previousName
+            beginStart(kind: .switching(to: newName))
+        case .error(.recordingStartFailed) where lastStartKind != .initial:
+            // FR-053: after a failed switch, picking a microphone starts recording on it
+            switchFromName = previousName
+            beginStart(kind: .switching(to: newName))
+        default:
+            break
         }
     }
 
@@ -358,7 +421,7 @@ final class RecordingViewModel {
                 if let device = selectedDevice,
                    device.transportType.isBluetooth,
                    !device.isSystemDefaultEntry {
-                    let _ = await audioDeviceManager.bluetoothProfileManager
+                    _ = await audioDeviceManager.bluetoothProfileManager
                         .prepareForRecording(device: device, context: .firstStart)
                     needsBTSwitch = true
                 }
@@ -509,9 +572,13 @@ final class RecordingViewModel {
         initialTextLanguageOnOpen = settings.globalTextLanguage
 
         targetAppTracker.startTracking()
+        MainThreadWatchdog.setStage("overlayShown")
 
         let contentView = OverlayContentView(viewModel: self)
         overlayManager.show(with: contentView)
+        overlayManager.installKeyMonitor { [weak self] event in
+            self?.handleKeyDown(event) ?? false
+        }
 
         // Auto-record if enabled
         if settings.autoRecord {
@@ -535,38 +602,184 @@ final class RecordingViewModel {
             )
         }
 
-        Task { @MainActor in
-            do {
-                let selectedDevice = audioDeviceManager.selectedDevice
-                var needsBTSwitch = false
+        beginStart(kind: .initial)
+    }
 
-                // FR-031: All Bluetooth devices need stabilization —
-                // even "already HFP" can have stale rate after A2DP restore
-                if let device = selectedDevice,
-                   device.transportType.isBluetooth,
-                   !device.isSystemDefaultEntry {
-                    let _ = await audioDeviceManager.bluetoothProfileManager
-                        .prepareForRecording(device: device, context: .firstStart)
-                    needsBTSwitch = true
+    /// spec 015 (US2, US9): `.starting` → up to two attempts on the same device → `.recording` or `.error`.
+    /// `.initial`: the 5 s budget starts after the Bluetooth mode switch, which has its own 5 s (FR-007).
+    /// `.switching`: one 5 s budget from the request, Bluetooth step included (FR-049).
+    private func beginStart(kind: StartKind) {
+        startTask?.cancel()
+        let requestedAt = ContinuousClock.now
+        startBeganAt = requestedAt
+        startKind = kind
+        preparedBluetoothDevice = nil
+        let isSwitch = kind != .initial
+        startDeviceName = audioDeviceManager.selectedDevice?.name ?? "System Default"
+        state = .starting(attempt: 1)
+
+        startTask = Task { @MainActor in
+            let selectedDevice = audioDeviceManager.selectedDevice
+            let deviceName = selectedDevice?.name ?? "System Default"
+            let btSwitchMs = await prepareBluetoothIfNeeded(selectedDevice, isSwitch: isSwitch)
+            let needsBTSwitch = btSwitchMs != nil
+            guard !Task.isCancelled else { return }
+
+            let captureDeviceID = resolveDeviceIDForCapture(uid: selectedDevice?.uid ?? "")
+            MainThreadWatchdog.setDevice(name: deviceName, id: captureDeviceID)
+            syncAudioSaveSettings()
+
+            let budgetStart = isSwitch ? requestedAt : ContinuousClock.now
+            var lastError: Error?
+            var attemptsMade = 0
+            for attempt in 1...2 {
+                guard !Task.isCancelled else { return }
+                state = .starting(attempt: attempt)
+
+                guard let timeouts = attemptTimeouts(attempt: attempt, isSwitch: isSwitch, budgetStart: budgetStart) else {
+                    lastError = AudioSetupError.timeout(step: "budget")
+                    break
                 }
+                attemptsMade = attempt
 
-                let captureDeviceID = resolveDeviceIDForCapture(uid: selectedDevice?.uid ?? "")
-                syncAudioSaveSettings()
-                try await audioCaptureService.startRecording(
-                    deviceID: captureDeviceID,
-                    maxDuration: settings.maxRecordingDuration,
-                    awaitBluetoothSwitch: needsBTSwitch
-                )
-                recordingStart = Date()
-                let maxSeconds = settings.maxRecordingDuration.timeInterval
-                state = .recording(duration: 0, remaining: maxSeconds)
-                startTimers()
-            } catch {
-                state = .error(mapError(error))
+                do {
+                    try await audioCaptureService.startRecording(
+                        deviceID: captureDeviceID,
+                        maxDuration: settings.maxRecordingDuration,
+                        awaitBluetoothSwitch: needsBTSwitch && attempt == 1,
+                        attempt: attempt,
+                        timeouts: timeouts
+                    )
+                    guard !Task.isCancelled else { return }
+                    lastStartKind = kind
+                    preparedBluetoothDevice = nil
+                    if isSwitch { logMicrophoneSwitch(outcome: "ok", attempts: attempt) }
+                    recordingStart = Date()
+                    let maxSeconds = settings.maxRecordingDuration.timeInterval
+                    state = .recording(duration: 0, remaining: maxSeconds)
+                    startTimers()
+                    let deviceSwitchMs = (btSwitchMs ?? 0) + audioCaptureService.lastBluetoothSwitchMs
+                    logAudio.info("Recording ready", metadata: [
+                        "hotkeyToReadyMs": "\(Int(max(0, Self.ms(since: requestedAt) - deviceSwitchMs)))",
+                        "btSwitchMs": "\(Int(deviceSwitchMs))",
+                        "attempts": "\(attempt)",
+                        "deviceName": deviceName,
+                        "deviceID": captureDeviceID ?? "default"
+                    ])
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    // Permission and similar errors aren't fixed by retrying
+                    if error is RecordingError {
+                        finishFailedStart(kind: kind, attempts: attempt, reason: "\(error)")
+                        state = .error(mapError(error))
+                        return
+                    }
+                    lastError = error
+                }
             }
+
+            guard !Task.isCancelled else { return }
+            let reason = (lastError as? AudioSetupError)?.startFailureReason ?? .deviceUnavailable
+            finishFailedStart(kind: kind, attempts: attemptsMade, reason: reason.shortDescription)
+            logAudio.error(
+                "Recording start failed after retry",
+                parameters: [
+                    "deviceName": deviceName,
+                    "deviceID": captureDeviceID ?? "default",
+                    "totalMs": "\(Int(Self.ms(since: requestedAt)))",
+                    "reason": reason.shortDescription
+                ],
+                errorCode: "recordingStartFailed"
+            )
+            state = .error(.recordingStartFailed(reason, deviceName: deviceName))
         }
     }
 
+    /// FR-031: every Bluetooth device needs stabilization — even "already HFP" can have a stale rate
+    /// after A2DP restore. Returns the preparation time in ms, or `nil` when the device isn't Bluetooth.
+    private func prepareBluetoothIfNeeded(_ device: AudioDevice?, isSwitch: Bool) async -> Double? {
+        guard let device, device.transportType.isBluetooth, !device.isSystemDefaultEntry else { return nil }
+        let btStart = ContinuousClock.now
+        _ = await audioDeviceManager.bluetoothProfileManager
+            .prepareForRecording(device: device, context: isSwitch ? .deviceSwitch : .firstStart)
+        preparedBluetoothDevice = device
+        return Self.ms(since: btStart)
+    }
+
+    /// Time limits for one attempt from what is left of the 5 s budget; `nil` when nothing is left.
+    /// A switch leaves room for setup and the first buffer after the Bluetooth step (FR-049).
+    private func attemptTimeouts(attempt: Int, isSwitch: Bool, budgetStart: ContinuousClock.Instant) -> StartTimeouts? {
+        let remaining = overallStartBudget - (ContinuousClock.now - budgetStart)
+        guard remaining > .zero else { return nil }
+        let setup = min(attempt == 1 ? attemptSetupTimeout : retrySetupTimeout, remaining)
+        // What's left after setup also caps the first-buffer wait
+        let firstBuffer = min(firstBufferTimeout, max(remaining - setup, .milliseconds(1)))
+        let bluetooth: Duration = isSwitch ? max(remaining - setup - firstBuffer, .milliseconds(1)) : .seconds(5)
+        return StartTimeouts(setup: setup, firstBuffer: firstBuffer, bluetooth: bluetooth)
+    }
+
+    /// After the last failed attempt: remember the kind (FR-053), restore A2DP on a prepared
+    /// Bluetooth target, and log the switch outcome (E16).
+    private func finishFailedStart(kind: StartKind, attempts: Int, reason: String) {
+        lastStartKind = kind
+        restorePreparedBluetoothDevice()
+        if kind != .initial {
+            logMicrophoneSwitch(outcome: "failed", attempts: attempts, reason: reason)
+        }
+    }
+
+    private func restorePreparedBluetoothDevice() {
+        if let device = preparedBluetoothDevice {
+            audioDeviceManager.bluetoothProfileManager.restoreA2DP(device: device)
+            preparedBluetoothDevice = nil
+        }
+    }
+
+    /// Event E16 `Microphone switch` (contracts/diagnostic-events.md, FR-057).
+    private func logMicrophoneSwitch(outcome: String, attempts: Int, trigger: String? = nil, reason: String? = nil) {
+        guard case .switching(let target) = startKind else { return }
+        var metadata = [
+            "from": switchFromName,
+            "to": target,
+            "outcome": outcome,
+            "durationMs": "\(Int(startBeganAt.map { Self.ms(since: $0) } ?? 0))",
+            "attempts": "\(attempts)"
+        ]
+        if let trigger { metadata["trigger"] = trigger }
+        if outcome == "failed" {
+            metadata["reason"] = reason ?? "unknown"
+            metadata["deviceID"] = selectedAudioDeviceID ?? "default"
+            logAudio.error("Microphone switch", parameters: metadata, errorCode: "microphoneSwitchFailed")
+        } else {
+            logAudio.info("Microphone switch", metadata: metadata)
+        }
+    }
+
+    /// Cancels a start in progress (hotkey, Esc, window close, Cancel button). Returns to `.idle`
+    /// synchronously; the audio host is torn down in the background (FR-013a).
+    func cancelStart(trigger: String) {
+        guard case .starting(let attempt) = state else { return }
+        startTask?.cancel()
+        startTask = nil
+        audioCaptureService.cancelStart()
+        audioDeviceManager.bluetoothProfileManager.cancelPreparation()
+        restorePreparedBluetoothDevice()  // FR-055
+        state = .idle
+        logUserAction.info("Recording start cancelled", metadata: [
+            "attempt": "\(attempt)",
+            "elapsedMs": "\(Int(startBeganAt.map { Self.ms(since: $0) } ?? 0))",
+            "trigger": trigger
+        ])
+        logMicrophoneSwitch(outcome: "cancelled", attempts: attempt, trigger: trigger)
+    }
+
+    private static func ms(since start: ContinuousClock.Instant) -> Double {
+        let elapsed = ContinuousClock.now - start
+        return Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
+    }
+
+    // swiftlint:disable:next cyclomatic_complexity - dictation pipeline, pre-existing (013/014); refactor out of scope for 015
     func stopRecording() {
         guard case .recording(let duration, _) = state, duration >= 2.0 else {
             return
@@ -665,7 +878,7 @@ final class RecordingViewModel {
 
                 let firstTurnMessages: [(role: String, content: String)] = [
                     ("system", enhancedSystemPrompt),
-                    ("user", rawText),
+                    ("user", rawText)
                 ]
 
                 if let streaming = streamingService {
@@ -679,6 +892,9 @@ final class RecordingViewModel {
                             accumulated += token
                             chatSession?.updateLastAssistantContent(accumulated)
                         }
+                    } catch let error as RecordingError where error.isModelUnavailable {
+                        // Same model would be rejected again — show the error (FR-040)
+                        throw error
                     } catch {
                         // Fallback to non-streaming on SSE error. The service
                         // accepts the already-assembled prompt as-is.
@@ -741,6 +957,7 @@ final class RecordingViewModel {
 
     /// T025: Cleanup all resources when overlay window closes (FR-020)
     func cleanup() {
+        cancelStart(trigger: "close")
         stopTimers()
         stopInputTimers()
         audioCaptureService.resetRecording()
@@ -818,6 +1035,7 @@ final class RecordingViewModel {
             currentFlowId = nil
         }
 
+        cancelStart(trigger: "esc")
         stopTimers()
         audioCaptureService.resetRecording()
         streamingService?.cancelStream()
@@ -842,25 +1060,12 @@ final class RecordingViewModel {
     func handleKeyDown(_ event: NSEvent) -> Bool {
         let eventModifiers = event.modifierFlags.intersection([.control, .option, .shift, .command])
 
-        // Recording start/stop handled via global HotkeyService → toggleOverlay → handleRecordingKey
-        // No in-window recording hotkey — only global ⌥Space
+        // Recording start/stop handled via GlobalHotkeyService → toggleOverlay → handleRecordingKey
+        // No in-window recording hotkey — only the global shortcut
 
         // Block ⌥-generated characters (ç, √) from being typed — FR-011
-        // Check ⌥⇧ BEFORE ⌥ to avoid ⌥⇧C falling into ⌥C branch
-        if eventModifiers == [.option, .shift] {
-            if windowPhase == .postProcessing {
-                if event.keyCode == 8 { copyPlainText(); return true }   // ⌥⇧C
-                if event.keyCode == 9 { pastePlainText(); return true }  // ⌥⇧V
-            }
-            return true // block other ⌥⇧-combinations
-        }
-
-        if eventModifiers == .option {
-            if windowPhase == .postProcessing {
-                if event.keyCode == 8 { copyMarkdown(); return true }    // ⌥C
-                if event.keyCode == 9 { pasteMarkdown(); return true }   // ⌥V
-            }
-            return true // block other ⌥-combinations
+        if eventModifiers == [.option, .shift] || eventModifiers == .option {
+            return handleOptionKey(event.keyCode, withShift: eventModifiers.contains(.shift))
         }
 
         // ⌘-shortcuts — allow standard macOS editing in input
@@ -885,25 +1090,41 @@ final class RecordingViewModel {
         case 53:  // Escape
             dismissOverlay()
             return true
-        case 36:  // Enter
-            if windowPhase == .postProcessing && eventModifiers.isEmpty {
-                sendMessage()
-                return true
-            }
-        case 18:  // 1 — cycle microphone
-            if windowPhase == .preProcessing && eventModifiers.isEmpty {
-                cycleMicrophone()
-                return true
-            }
-        case 19:  // 2 — cycle text language (was voice language before 011-language-ui-rework)
-            if windowPhase == .preProcessing && eventModifiers.isEmpty {
-                cycleTextLanguage()
-                return true
-            }
+        case 36 where windowPhase == .postProcessing && eventModifiers.isEmpty:  // Enter
+            sendMessage()
+            return true
+        case 18, 19, 20:
+            return eventModifiers.isEmpty && handleNumberKey(event.keyCode)
         default:
-            break
+            return false
         }
-        return false
+    }
+
+    /// ⌥C/⌥V copy or paste Markdown, ⌥⇧C/⌥⇧V plain text (post-processing only).
+    /// Every other ⌥ or ⌥⇧ combination is swallowed so it can't type ç, √ … (FR-011).
+    private func handleOptionKey(_ keyCode: UInt16, withShift: Bool) -> Bool {
+        guard windowPhase == .postProcessing else { return true }
+        switch (keyCode, withShift) {
+        case (8, true): copyPlainText()    // ⌥⇧C
+        case (9, true): pastePlainText()   // ⌥⇧V
+        case (8, false): copyMarkdown()    // ⌥C
+        case (9, false): pasteMarkdown()   // ⌥V
+        default: break
+        }
+        return true
+    }
+
+    /// spec 015 (US4, R29): 1 microphone, 2 output language, 3 prompt — matches the bar order;
+    /// pre-recording phase while idle, recording or showing an error.
+    private func handleNumberKey(_ keyCode: UInt16) -> Bool {
+        guard canCycleSelections else { return false }
+        switch keyCode {
+        case 18: cycleMicrophone()     // 1
+        case 19: cycleTextLanguage()   // 2
+        case 20: cyclePrompt()         // 3
+        default: return false
+        }
+        return true
     }
 
     func retryFromError() {
@@ -957,6 +1178,9 @@ final class RecordingViewModel {
                                 accumulated += token
                                 chatSession?.updateLastAssistantContent(accumulated)
                             }
+                        } catch let error as RecordingError where error.isModelUnavailable {
+                            // Same model would be rejected again — show the error (FR-040)
+                            throw error
                         } catch {
                             // Fallback to non-streaming on SSE error.
                             let formattedText = try await formattingService.format(
@@ -990,7 +1214,8 @@ final class RecordingViewModel {
         }
     }
 
-    private func handleRecordingKey() {
+    /// Internal (not private) so tests can drive the hotkey path without showing the overlay.
+    func handleRecordingKey() {
         // In postProcessing: ⌥Space toggles voice input in input field
         if windowPhase == .postProcessing {
             switch inputRecordingState {
@@ -1008,6 +1233,8 @@ final class RecordingViewModel {
         switch state {
         case .idle:
             startRecording()
+        case .starting:
+            cancelStart(trigger: "hotkey")
         case .recording:
             stopRecording()
         case .error:
@@ -1058,6 +1285,9 @@ final class RecordingViewModel {
         if let recordingError = error as? RecordingError {
             return recordingError
         }
+        if let setupError = error as? AudioSetupError {
+            return .recordingStartFailed(setupError.startFailureReason, deviceName: startDeviceName)
+        }
         if let processingError = error as? ProcessingError {
             switch processingError {
             case .apiKeyMissing:
@@ -1078,6 +1308,21 @@ final class RecordingViewModel {
     }
 }
 
+// MARK: - Watchdog stage (spec 015, T058)
+
+extension RecordingViewModel {
+    nonisolated static func watchdogStage(for state: RecordingState) -> String {
+        switch state {
+        case .idle: return "idle"
+        case .starting(let attempt): return "starting.\(attempt)"
+        case .recording: return "recording"
+        case .transcribing: return "transcribing"
+        case .formatting: return "formatting"
+        case .error: return "error"
+        }
+    }
+}
+
 // MARK: - AppStateProvider (T036)
 
 extension RecordingViewModel: @preconcurrency AppStateProvider {
@@ -1085,6 +1330,7 @@ extension RecordingViewModel: @preconcurrency AppStateProvider {
         let status: String
         switch state {
         case .idle: status = "idle"
+        case .starting: status = "starting"
         case .recording: status = "recording"
         case .transcribing: status = "transcribing"
         case .formatting: status = "formatting"

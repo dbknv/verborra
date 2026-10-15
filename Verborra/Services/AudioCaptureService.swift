@@ -13,6 +13,18 @@ enum DeviceErrorReason: Sendable {
     case formatChanged
 }
 
+// MARK: - StartTimeouts (spec 015, research R7/R31)
+
+/// Time limits for one start attempt.
+struct StartTimeouts: Equatable, Sendable {
+    /// Engine setup on the host queue.
+    var setup: Duration = .milliseconds(1800)
+    /// Wait for the first buffer; a running engine without buffers still counts as success.
+    var firstBuffer: Duration = .milliseconds(600)
+    /// Bluetooth trigger plus the wait for the headset's rate to settle.
+    var bluetooth: Duration = .seconds(5)
+}
+
 // MARK: - AudioCaptureServiceProtocol
 
 @MainActor
@@ -21,9 +33,20 @@ protocol AudioCaptureServiceProtocol: AnyObject {
     var currentDuration: TimeInterval { get }
     var onAutoStop: (@Sendable @MainActor () -> Void)? { get set }
     var onDeviceError: (@Sendable @MainActor (_ deviceName: String?, _ reason: DeviceErrorReason) -> Void)? { get set }
-    var onDeviceFallback: (@Sendable @MainActor (_ fallbackDeviceName: String) -> Void)? { get set }
     var audioSaveSettings: (enabled: Bool, folderBookmark: Data?)? { get set }
-    func startRecording(deviceID: String?, maxDuration: MaxRecordingDuration, awaitBluetoothSwitch: Bool) async throws
+    /// Milliseconds the last attempt spent on the Bluetooth mode switch (0 if none). For event E13.
+    var lastBluetoothSwitchMs: Double { get }
+    /// One start attempt (spec 015): no retries, never changes the device. Throws `AudioSetupError`
+    /// for engine failures, `RecordingError` for permission problems.
+    func startRecording(
+        deviceID: String?,
+        maxDuration: MaxRecordingDuration,
+        awaitBluetoothSwitch: Bool,
+        attempt: Int,
+        timeouts: StartTimeouts
+    ) async throws
+    /// Abandons a start in progress. Never blocks.
+    func cancelStart()
     func stopRecording() async throws -> Data
     func resetRecording()
     func updateLevelsFromAtomic()
@@ -31,8 +54,19 @@ protocol AudioCaptureServiceProtocol: AnyObject {
 }
 
 extension AudioCaptureServiceProtocol {
-    func startRecording(deviceID: String?, maxDuration: MaxRecordingDuration) async throws {
-        try await startRecording(deviceID: deviceID, maxDuration: maxDuration, awaitBluetoothSwitch: false)
+    func startRecording(
+        deviceID: String?,
+        maxDuration: MaxRecordingDuration,
+        awaitBluetoothSwitch: Bool = false,
+        attempt: Int = 1
+    ) async throws {
+        try await startRecording(
+            deviceID: deviceID,
+            maxDuration: maxDuration,
+            awaitBluetoothSwitch: awaitBluetoothSwitch,
+            attempt: attempt,
+            timeouts: StartTimeouts()
+        )
     }
 }
 
@@ -41,7 +75,17 @@ extension AudioCaptureServiceProtocol {
 @MainActor
 @Observable
 final class AudioCaptureService: AudioCaptureServiceProtocol {
-    private var engine: AVAudioEngine?
+    /// spec 015 (US2): every engine call during start/stop runs on the host's queue.
+    private var host: any AudioEngineHosting
+    @ObservationIgnored private let hostFactory: @MainActor () -> any AudioEngineHosting
+    /// Set when a call on the current host timed out; only then is the host abandoned (research R31).
+    private nonisolated let hostTimedOut = ManagedAtomic<Bool>(false)
+    /// Bumped on every attempt and on cancel; late results from older generations are ignored.
+    private var generation: UInt64 = 0
+    private nonisolated let activeGeneration = ManagedAtomic<UInt64>(0)
+    /// While the engine restarts after a device format change, "engine not running" isn't a disconnect.
+    private var isRestartingAfterFormatChange = false
+    private(set) var lastBluetoothSwitchMs: Double = 0
     private var maxDurationSeconds: TimeInterval = MaxRecordingDuration.default.timeInterval
     private static let maxFileSize = 25 * 1024 * 1024  // 25 MB
     private var recordingStartTime: Date?
@@ -96,7 +140,6 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
     private(set) var currentDuration: TimeInterval = 0.0
     var onAutoStop: (@Sendable @MainActor () -> Void)?
     var onDeviceError: (@Sendable @MainActor (_ deviceName: String?, _ reason: DeviceErrorReason) -> Void)?
-    var onDeviceFallback: (@Sendable @MainActor (_ fallbackDeviceName: String) -> Void)?
 
     /// Settings for file writing — set before startRecording.
     var audioSaveSettings: (enabled: Bool, folderBookmark: Data?)? {
@@ -108,25 +151,61 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
         }
     }
 
-    // MARK: - Recording Operations (T010, T011, T012)
+    init(hostFactory: @escaping @MainActor () -> any AudioEngineHosting = { AudioEngineHost() }) {
+        self.hostFactory = hostFactory
+        self.host = hostFactory()
+    }
 
-    func startRecording(deviceID: String?, maxDuration: MaxRecordingDuration, awaitBluetoothSwitch: Bool = false) async throws {
+    // MARK: - Host lifecycle (spec 015, US9, research R31)
+
+    /// Before each start: a healthy host is reused, so the teardown queued here (or by `resetRecording`)
+    /// runs before the next start on the same serial queue and stop/start never overlap (FR-050).
+    /// A host whose call timed out is abandoned and replaced.
+    func prepareHostForStart() {
+        if hostTimedOut.load(ordering: .acquiring) {
+            logEngine.info("Audio host abandoned after timeout", metadata: [
+                "step": host.currentStep.name
+            ])
+            host = hostFactory()
+            hostTimedOut.store(false, ordering: .releasing)
+        } else {
+            host.teardown(generation: nil)
+        }
+    }
+
+    /// Marks the current host as stuck; called from the timeout paths.
+    nonisolated func noteHostTimedOut() {
+        hostTimedOut.store(true, ordering: .releasing)
+    }
+
+    /// Display name for logs and errors: the device's name, "System Default" for nil, else the raw id.
+    static func displayName(forDeviceID deviceID: String?, resolver: (AudioDeviceID) -> String?) -> String {
+        guard let deviceID else { return "System Default" }
+        return AudioDeviceID(deviceID).flatMap(resolver) ?? deviceID
+    }
+
+    // MARK: - Recording Operations (T010, T011, T012; spec 015 T051)
+
+    func startRecording(
+        deviceID: String?,
+        maxDuration: MaxRecordingDuration,
+        awaitBluetoothSwitch: Bool,
+        attempt: Int,
+        timeouts: StartTimeouts
+    ) async throws {
         // FR-010: Ignore duplicate calls
         guard !_isRecording.load(ordering: .acquiring) else {
             logAudio.info("Duplicate startRecording ignored")
             return
         }
 
-        let deviceName: String
-        if let deviceID, let id = AudioDeviceID(deviceID) {
-            deviceName = Self.deviceName(for: id) ?? deviceID
-        } else {
-            deviceName = "System Default"
-        }
-        currentDeviceName = deviceName
+        currentDeviceName = Self.displayName(forDeviceID: deviceID, resolver: CoreAudioQuery.name)
+        currentDeviceIDForRecording = deviceID
+        lastBluetoothSwitchMs = 0
+        MainThreadWatchdog.setDevice(name: currentDeviceName, id: deviceID)
         logAudio.info("startRecording", metadata: [
-            "deviceName": deviceName,
             "deviceID": deviceID ?? "default",
+            "attempt": "\(attempt)",
             "maxDuration": "\(maxDuration.timeInterval)s",
             "awaitBluetoothSwitch": "\(awaitBluetoothSwitch)"
         ])
@@ -148,12 +227,12 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
             break
         }
 
-        // Clean state
-        if let existingEngine = engine {
-            existingEngine.inputNode.removeTap(onBus: 0)
-            existingEngine.stop()
-        }
-        engine = AVAudioEngine()
+        // Reuse a healthy host; replace one whose call timed out (contracts/recording-start.md)
+        prepareHostForStart()
+
+        generation &+= 1
+        let gen = generation
+        activeGeneration.store(gen, ordering: .releasing)
 
         // Reset buffers and atomics
         ringBuffer.reset()
@@ -170,60 +249,202 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
         maxDurationSeconds = maxDuration.timeInterval
         _maxDurationBits.store(maxDuration.timeInterval.bitPattern, ordering: .relaxed)
 
-        currentDeviceIDForRecording = deviceID
-
-        // BT A2DP→HFP: start engine to trigger switch, wait for stabilization, restart
-        if awaitBluetoothSwitch {
-            let resolvedID = try startEngineForBTSwitch(deviceID: deviceID)
-            let initialRate = Self.deviceNominalSampleRate(for: resolvedID) ?? 48000
-
-            logBluetooth.info("bt_switch_engine_started", metadata: [
-                "deviceName": deviceName,
-                "deviceID": "\(resolvedID)",
-                "initialRate": "\(initialRate)"
-            ])
-
-            let finalRate = try await awaitBluetoothStabilization(
-                deviceID: resolvedID,
-                initialRate: initialRate
-            )
-
-            logBluetooth.info("bt_switch_stabilized", metadata: [
-                "deviceName": deviceName,
-                "deviceID": "\(resolvedID)",
-                "finalRate": "\(finalRate)"
-            ])
-
-            // Stop trigger engine, create fresh one for actual recording
-            if let triggerEngine = engine {
-                triggerEngine.stop()
+        let audioDeviceID = deviceID.flatMap { AudioDeviceID($0) }
+        var timings = AudioSetupTimings()
+        var outcome = "failed"
+        do {
+            // BT A2DP→HFP: start a trigger engine, wait for the rate to settle (own 5 s budget)
+            if awaitBluetoothSwitch {
+                let btStart = ContinuousClock.now
+                try await runBluetoothSwitch(deviceID: audioDeviceID, generation: gen, timeout: timeouts.bluetooth)
+                lastBluetoothSwitchMs = Self.ms(since: btStart)
+                try checkGeneration(gen)
             }
-            engine = AVAudioEngine()
-        }
 
-        try prepareAndStartEngine(deviceID: deviceID)
+            let result = try await startHost(deviceID: audioDeviceID, generation: gen, setupTimeout: timeouts.setup)
+            timings = result.timings
+            try checkGeneration(gen)
 
-        // Start file writing if enabled (T032)
-        startFileWritingIfNeeded(deviceName: deviceName)
+            currentDeviceName = result.deviceName ?? currentDeviceName
+            MainThreadWatchdog.setDevice(name: currentDeviceName, id: deviceID)
+            lastKnownSampleRate = result.timings.nodeSampleRate
+            installDeviceFormatListener(deviceID: result.resolvedDevice)
+            startFileWritingIfNeeded(deviceName: currentDeviceName ?? "System Default", format: result.nodeFormat)
 
-        // FR-010: Mark as recording after engine started
-        _isRecording.store(true, ordering: .releasing)
+            // FR-010: Mark as recording after engine started
+            _isRecording.store(true, ordering: .releasing)
 
-        // FR-009: Wait for Bluetooth device to start delivering data (T015)
-        for _ in 0..<50 {
-            try await Task.sleep(nanoseconds: 100_000_000) // 100ms
-            if !ringBuffer.isEmpty { break }
-        }
-        if ringBuffer.isEmpty && _isRecording.load(ordering: .acquiring) {
-            // Check if engine is still running - device may have failed silently
-            if engine?.isRunning == false {
+            // First buffer: if the engine runs but no buffer arrived yet, that still counts as success
+            let waitStart = ContinuousClock.now
+            let deadline = waitStart + timeouts.firstBuffer
+            while ringBuffer.isEmpty, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+                try checkGeneration(gen)
+            }
+            timings.firstBufferMs = Self.ms(since: waitStart)
+            if ringBuffer.isEmpty && !host.isEngineRunning {
+                throw AudioSetupFailure(error: .engineStartFailed(step: "firstBuffer", underlying: "engine stopped before the first buffer"), timings: timings)
+            }
+
+            outcome = "ok"
+            logRecordingOnDevice(timings: timings)
+            logSetupTimings(timings, attempt: attempt, generation: gen, outcome: outcome)
+        } catch {
+            let setupError: AudioSetupError
+            switch error {
+            case let failure as AudioSetupFailure:
+                setupError = failure.error
+                timings = failure.timings
+            case let failure as AudioSetupError:
+                setupError = failure
+            case is CancellationError:
+                setupError = .cancelled
+            default:
+                setupError = .engineStartFailed(step: host.currentStep.name, underlying: error.localizedDescription)
+            }
+            outcome = {
+                switch setupError {
+                case .timeout: return "timeout"
+                case .cancelled: return "cancelled"
+                default: return "failed"
+                }
+            }()
+
+            // Only clean up if this attempt is still the current one; a cancel already did it.
+            if activeGeneration.load(ordering: .acquiring) == gen {
                 _isRecording.store(false, ordering: .releasing)
-                logAudio.error("Device not responding after 5s timeout",
-                              parameters: ["deviceName": currentDeviceName ?? "Unknown", "deviceID": currentDeviceIDForRecording ?? "default"],
-                              errorCode: "deviceNotResponding")
-                throw RecordingError.deviceNotResponding
+                removeDeviceFormatListener()
+                stopFileWriting()
+                cleanupBTStabilization()
             }
+            host.teardown(generation: gen)
+
+            logSetupTimings(timings, attempt: attempt, generation: gen, outcome: outcome)
+            if setupError != .cancelled {
+                logEngine.error(
+                    "Audio setup failed",
+                    parameters: [
+                        "step": setupError.step,
+                        "attempt": "\(attempt)",
+                        "deviceName": currentDeviceName ?? "Unknown",
+                        "deviceID": deviceID ?? "default",
+                        "nodeSampleRate": "\(timings.nodeSampleRate)",
+                        "hwSampleRate": "\(timings.hwSampleRate)",
+                        "reason": setupError.reason
+                    ],
+                    errorCode: setupError.errorCode
+                )
+            }
+            throw setupError
         }
+    }
+
+    func cancelStart() {
+        generation &+= 1
+        activeGeneration.store(generation, ordering: .releasing)
+        _isRecording.store(false, ordering: .releasing)
+        host.teardown(generation: nil)
+        if let continuation = btStabilizationContinuation {
+            btStabilizationContinuation = nil
+            continuation.resume(throwing: AudioSetupError.cancelled)
+        }
+        cleanupBTStabilization()
+        removeDeviceFormatListener()
+        stopFileWriting()
+        ringBuffer.reset()
+        accumulatedBuffers.removeAll()
+    }
+
+    // MARK: - Private: start helpers (spec 015)
+
+    private func checkGeneration(_ gen: UInt64) throws {
+        guard activeGeneration.load(ordering: .acquiring) == gen, !Task.isCancelled else {
+            throw AudioSetupError.cancelled
+        }
+    }
+
+    /// Host start raced against `setupTimeout`; on timeout the step that hung is reported.
+    private func startHost(deviceID: AudioDeviceID?, generation gen: UInt64, setupTimeout: Duration) async throws -> AudioHostStartResult {
+        let host = self.host
+        let timedOut = hostTimedOut
+        let generationCheck = activeGeneration
+        let onBuffer: @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void = { [weak self] buffer, time in
+            guard generationCheck.load(ordering: .relaxed) == gen else { return }
+            self?.handleAudioBuffer(buffer, time: time)
+        }
+        return try await raceWithTimeout(setupTimeout, onTimeout: {
+            timedOut.store(true, ordering: .releasing)
+            return AudioSetupError.timeout(step: host.currentStep.name)
+        }, operation: {
+            try await host.start(deviceID: deviceID, generation: gen, onBuffer: onBuffer)
+        })
+    }
+
+    /// Trigger engine + wait for the headset's rate to settle, both within `timeout` (research R31, FR-049).
+    private func runBluetoothSwitch(deviceID: AudioDeviceID?, generation gen: UInt64, timeout: Duration) async throws {
+        let host = self.host
+        let timedOut = hostTimedOut
+        let started = ContinuousClock.now
+        let resolvedID = try await raceWithTimeout(timeout, onTimeout: {
+            timedOut.store(true, ordering: .releasing)
+            return AudioSetupError.timeout(step: "btTrigger")
+        }, operation: {
+            try await host.startBluetoothTrigger(deviceID: deviceID, generation: gen)
+        })
+        let initialRate = Self.deviceNominalSampleRate(for: resolvedID) ?? 48000
+        logBluetooth.info("bt_switch_engine_started", metadata: [
+            "deviceName": currentDeviceName ?? "Unknown",
+            "deviceID": "\(resolvedID)",
+            "initialRate": "\(initialRate)"
+        ])
+        let remaining = timeout - (ContinuousClock.now - started)
+        let finalRate = try await awaitBluetoothStabilization(
+            deviceID: resolvedID,
+            initialRate: initialRate,
+            timeout: max(remaining, .milliseconds(1))
+        )
+        logBluetooth.info("bt_switch_stabilized", metadata: [
+            "deviceName": currentDeviceName ?? "Unknown",
+            "deviceID": "\(resolvedID)",
+            "finalRate": "\(finalRate)"
+        ])
+    }
+
+    private func logRecordingOnDevice(timings: AudioSetupTimings) {
+        // FR-012: Log device ID, name, and sample rate at recording start
+        logAudio.info("Recording on device", metadata: [
+            "deviceName": currentDeviceName ?? "System Default",
+            "deviceID": currentDeviceIDForRecording ?? "default",
+            "sampleRate": "\(timings.nodeSampleRate)"
+        ])
+    }
+
+    /// Event E1 (contracts/diagnostic-events.md).
+    private func logSetupTimings(_ timings: AudioSetupTimings, attempt: Int, generation gen: UInt64, outcome: String) {
+        func ms(_ value: Double) -> String { String(format: "%.1f", value) }
+        logEngine.info("Audio setup timings", metadata: [
+            "attempt": "\(attempt)",
+            "generation": "\(gen)",
+            "outcome": outcome,
+            "deviceName": currentDeviceName ?? "Unknown",
+            "deviceID": currentDeviceIDForRecording ?? "default",
+            "engineCreateMs": ms(timings.engineCreateMs),
+            "setDeviceMs": ms(timings.setDeviceMs),
+            "readFormatsMs": ms(timings.readFormatsMs),
+            "installTapMs": ms(timings.installTapMs),
+            "prepareMs": ms(timings.prepareMs),
+            "startMs": ms(timings.startMs),
+            "firstBufferMs": timings.firstBufferMs.map(ms) ?? "",
+            "nodeSampleRate": "\(timings.nodeSampleRate)",
+            "hwSampleRate": "\(timings.hwSampleRate)",
+            "channels": "\(timings.channels)",
+            "recreatedForStaleNode": "\(timings.recreatedForStaleNode)"
+        ])
+    }
+
+    private static func ms(since start: ContinuousClock.Instant) -> Double {
+        let elapsed = ContinuousClock.now - start
+        return Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
     }
 
     func stopRecording() async throws -> Data {
@@ -241,14 +462,9 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
             "duration": String(format: "%.1fs", duration)
         ])
 
-        guard let currentEngine = engine else {
-            throw RecordingError.notRecording
-        }
-
         removeDeviceFormatListener()
         stopFileWriting()
-        currentEngine.inputNode.removeTap(onBus: 0)
-        currentEngine.stop()
+        await host.stop()
         audioLevel = 0
 
         // T011: Combine accumulated + remaining from ring buffer
@@ -289,10 +505,7 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
         removeDeviceFormatListener()
         lastKnownSampleRate = nil
         stopFileWriting()
-        if let currentEngine = engine {
-            currentEngine.inputNode.removeTap(onBus: 0)
-            currentEngine.stop()
-        }
+        host.teardown(generation: nil)
         ringBuffer.reset()
         accumulatedBuffers.removeAll()
         _atomicAudioLevel.store(0, ordering: .relaxed)
@@ -357,7 +570,7 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
         }
 
         // T013b: Device error detection (engine stopped unexpectedly)
-        if engine?.isRunning == false {
+        if !isRestartingAfterFormatChange && !host.isEngineRunning {
             _isRecording.store(false, ordering: .releasing)
             let name = currentDeviceName
             logAudio.error("Engine stopped unexpectedly",
@@ -488,28 +701,11 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
 
     // MARK: - Bluetooth A2DP→HFP Stabilization
 
-    /// Start engine without tap to trigger A2DP→HFP switch. Returns resolved AudioDeviceID.
-    private func startEngineForBTSwitch(deviceID: String?) throws -> AudioDeviceID {
-        guard let currentEngine = engine else { throw RecordingError.microphoneNotAvailable }
-
-        var resolvedDeviceID: AudioDeviceID
-
-        if let deviceID, let device = selectDevice(id: deviceID) {
-            setInputDevice(device, on: currentEngine)
-            resolvedDeviceID = device
-        } else {
-            resolvedDeviceID = currentEngine.inputNode.auAudioUnit.deviceID
-        }
-
-        currentEngine.prepare()
-        try currentEngine.start()
-        return resolvedDeviceID
-    }
-
-    /// Wait for BT sample rate to stabilize after engine start (300ms debounce, 5s timeout).
+    /// Wait for BT sample rate to stabilize after engine start (300ms debounce, `timeout` overall).
     /// Works for both A2DP→HFP switch and already-HFP with potential rate transients.
-    private func awaitBluetoothStabilization(deviceID: AudioDeviceID, initialRate: Double) async throws -> Double {
-        try await withCheckedThrowingContinuation { continuation in
+    private func awaitBluetoothStabilization(deviceID: AudioDeviceID, initialRate: Double, timeout: Duration) async throws -> Double {
+        let timeoutSeconds = Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18
+        return try await withCheckedThrowingContinuation { continuation in
             self.btStabilizationContinuation = continuation
             self.btStabilizationDeviceID = deviceID
 
@@ -542,7 +738,7 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: initialCheck)
 
-            // 5s overall timeout (FR-014)
+            // Overall timeout: what is left of the Bluetooth budget (FR-014, FR-049)
             let timeout = DispatchWorkItem { [weak self] in
                 guard let self, let cont = self.btStabilizationContinuation else { return }
                 self.cleanupBTStabilization()
@@ -555,7 +751,7 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
                 cont.resume(returning: currentRate)
             }
             self.btStabilizationTimeout = timeout
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: timeout)
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSeconds, execute: timeout)
         }
     }
 
@@ -602,183 +798,11 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
         btStabilizationDeviceID = nil
     }
 
-    // MARK: - Private: Engine Setup
-
-    private func prepareAndStartEngine(deviceID: String?) throws {
-        guard let currentEngine = engine else { return }
-        logEngine.info("Preparing audio engine", metadata: [
-            "deviceName": currentDeviceName ?? "Unknown",
-            "deviceID": deviceID ?? "default"
-        ])
-
-        var resolvedDeviceID: AudioDeviceID?
-
-        if let deviceID, let device = selectDevice(id: deviceID) {
-            setInputDevice(device, on: currentEngine)
-            resolvedDeviceID = device
-            let deviceName = Self.deviceName(for: device) ?? "Unknown"
-            logAudio.info("Device selected", metadata: [
-                "deviceName": deviceName,
-                "deviceID": deviceID
-            ])
-        } else {
-            resolvedDeviceID = currentEngine.inputNode.auAudioUnit.deviceID
-            let defaultName = Self.deviceName(for: resolvedDeviceID!) ?? "System Default"
-            logAudio.info("Using default device", metadata: [
-                "deviceName": defaultName,
-                "deviceID": "\(resolvedDeviceID!)"
-            ])
-        }
-
-        let inputNode = currentEngine.inputNode
-
-        // Query actual hardware sample rate from CoreAudio (not from inputNode which may lag)
-        let actualSampleRate: Double
-        if let devID = resolvedDeviceID, let hwRate = Self.deviceNominalSampleRate(for: devID) {
-            actualSampleRate = hwRate
-        } else {
-            actualSampleRate = inputNode.outputFormat(forBus: 0).sampleRate
-        }
-
-        logEngine.debug("Engine hardware format", metadata: [
-            "deviceName": currentDeviceName ?? "System Default",
-            "deviceID": currentDeviceIDForRecording ?? "default",
-            "actualHWSampleRate": "\(actualSampleRate)",
-            "nodeOutputSampleRate": "\(inputNode.outputFormat(forBus: 0).sampleRate)",
-            "channels": "\(inputNode.outputFormat(forBus: 0).channelCount)"
-        ])
-
-        guard actualSampleRate > 0, inputNode.outputFormat(forBus: 0).channelCount > 0 else {
-            logEngine.error("Invalid hardware format", parameters: [
-                "deviceName": currentDeviceName ?? "Unknown",
-                "deviceID": currentDeviceIDForRecording ?? "default",
-                "sampleRate": "\(actualSampleRate)",
-                "channels": "\(inputNode.outputFormat(forBus: 0).channelCount)"
-            ], errorCode: "microphoneNotAvailable")
-            throw RecordingError.microphoneNotAvailable
-        }
-
-        // Create tap format matching actual hardware sample rate
-        let tapFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: actualSampleRate,
-            channels: 1,
-            interleaved: false
-        )
-
-        installRecordingTap(on: inputNode, format: tapFormat)
-
-        let resolvedName = resolvedDeviceID.flatMap { Self.deviceName(for: $0) } ?? "Unknown"
-
-        currentEngine.prepare()
-        do {
-            try currentEngine.start()
-            // FR-012: Log device ID, name, and sample rate at recording start
-            logAudio.info("Recording on device", metadata: [
-                "deviceName": resolvedName,
-                "deviceID": currentDeviceIDForRecording ?? "default",
-                "sampleRate": "\(actualSampleRate)"
-            ])
-            // Install format change listener on the active device
-            lastKnownSampleRate = actualSampleRate
-            if let devID = resolvedDeviceID {
-                installDeviceFormatListener(deviceID: devID)
-            }
-        } catch {
-            logEngine.error("Engine start failed, retrying with default device",
-                           parameters: [
-                               "deviceName": currentDeviceName ?? "Unknown",
-                               "deviceID": deviceID ?? "default"
-                           ],
-                           errorCode: "\(error)")
-
-            inputNode.removeTap(onBus: 0)
-            currentEngine.stop()
-            engine = AVAudioEngine()
-
-            guard let retryEngine = engine else { return }
-            let retryNode = retryEngine.inputNode
-            let defaultDeviceID = retryNode.auAudioUnit.deviceID
-            let defaultName = Self.deviceName(for: defaultDeviceID) ?? "System Default"
-
-            let retrySampleRate: Double
-            if let hwRate = Self.deviceNominalSampleRate(for: defaultDeviceID) {
-                retrySampleRate = hwRate
-            } else {
-                retrySampleRate = retryNode.outputFormat(forBus: 0).sampleRate
-            }
-
-            guard retrySampleRate > 0, retryNode.outputFormat(forBus: 0).channelCount > 0 else {
-                logEngine.error("Retry with default device failed",
-                               parameters: ["deviceName": defaultName, "deviceID": "\(defaultDeviceID)"],
-                               errorCode: "microphoneNotAvailable")
-                throw RecordingError.microphoneNotAvailable
-            }
-
-            logEngine.debug("Retry engine format", metadata: [
-                "deviceName": defaultName,
-                "deviceID": "\(defaultDeviceID)",
-                "sampleRate": "\(retrySampleRate)",
-                "channels": "\(retryNode.outputFormat(forBus: 0).channelCount)"
-            ])
-
-            let retryTapFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: retrySampleRate,
-                channels: 1,
-                interleaved: false
-            )
-            installRecordingTap(on: retryNode, format: retryTapFormat)
-            retryEngine.prepare()
-            try retryEngine.start()
-            // Update internal state to reflect actual device
-            currentDeviceName = defaultName
-            currentDeviceIDForRecording = nil // nil = system default
-
-            logAudio.info("Recording on device (fallback to default)", metadata: [
-                "deviceName": defaultName,
-                "originalDevice": resolvedName,
-                "sampleRate": "\(retrySampleRate)"
-            ])
-            lastKnownSampleRate = retrySampleRate
-            installDeviceFormatListener(deviceID: defaultDeviceID)
-
-            // Notify UI about fallback
-            onDeviceFallback?(defaultName)
-        }
-    }
-
-    /// T009: Install tap with explicit format matching hardware
-    private func installRecordingTap(on inputNode: AVAudioInputNode, format: AVAudioFormat?) {
-        let tapFormat = format ?? inputNode.outputFormat(forBus: 0)
-        logTap.info("Installing recording tap", metadata: [
-            "deviceName": currentDeviceName ?? "System Default",
-            "deviceID": currentDeviceIDForRecording ?? "default",
-            "bufferSize": "4096",
-            "sampleRate": "\(tapFormat.sampleRate)",
-            "channels": "\(tapFormat.channelCount)"
-        ])
-
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, time in
-            self?.handleAudioBuffer(buffer, time: time)
-        }
-    }
-
     // MARK: - Device Format Change Monitoring
 
     /// Query the device's actual nominal sample rate via CoreAudio
     private static func deviceNominalSampleRate(for deviceID: AudioDeviceID) -> Double? {
-        var sampleRate: Float64 = 0
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var size = UInt32(MemoryLayout<Float64>.size)
-        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &sampleRate) == noErr else {
-            return nil
-        }
-        return sampleRate
+        CoreAudioQuery.nominalSampleRate(deviceID)
     }
 
     /// Install CoreAudio property listener for sample rate changes (AirPods mode switching)
@@ -853,13 +877,14 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
             "oldSampleRate": lastKnownSampleRate.map { "\($0)" } ?? "unknown"
         ])
 
-        // Stop current engine and file writing
+        // Stop current engine and file writing (teardown runs on the host queue)
         removeDeviceFormatListener()
         stopFileWriting()
-        if let currentEngine = engine {
-            currentEngine.inputNode.removeTap(onBus: 0)
-            currentEngine.stop()
-        }
+        isRestartingAfterFormatChange = true
+        generation &+= 1
+        let gen = generation
+        activeGeneration.store(gen, ordering: .releasing)
+        host.teardown(generation: nil)
 
         // Reset all buffers — recording starts from scratch
         ringBuffer.reset()
@@ -873,32 +898,44 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
         currentDuration = 0
         audioLevel = 0
 
-        // Restart with fresh engine
-        engine = AVAudioEngine()
-        do {
-            try prepareAndStartEngine(deviceID: currentDeviceIDForRecording)
-            // Restart file writing with new format (FR-024)
-            startFileWritingIfNeeded(deviceName: currentDeviceName ?? "System Default")
-            logBluetooth.info("Recording restarted after format change", metadata: [
-                "deviceName": currentDeviceName ?? "Unknown",
-                "deviceID": currentDeviceIDForRecording ?? "default"
-            ])
-        } catch {
-            _isRecording.store(false, ordering: .releasing)
-            logBluetooth.error("Failed to restart after format change",
-                              parameters: [
-                                  "deviceName": currentDeviceName ?? "Unknown",
-                                  "deviceID": currentDeviceIDForRecording ?? "default",
-                                  "error": "\(error)"
-                              ],
-                              errorCode: "formatChangeRestartFailed")
-            onDeviceError?(currentDeviceName, .formatChanged)
+        // Restart with a fresh engine off the main thread
+        if hostTimedOut.load(ordering: .acquiring) {
+            host = hostFactory()
+            hostTimedOut.store(false, ordering: .releasing)
+        }
+        let restartDeviceID = currentDeviceIDForRecording.flatMap { AudioDeviceID($0) }
+        Task { @MainActor in
+            defer { self.isRestartingAfterFormatChange = false }
+            do {
+                let result = try await self.startHost(deviceID: restartDeviceID, generation: gen, setupTimeout: .milliseconds(2400))
+                try self.checkGeneration(gen)
+                self.lastKnownSampleRate = result.timings.nodeSampleRate
+                self.installDeviceFormatListener(deviceID: result.resolvedDevice)
+                // Restart file writing with new format (FR-024)
+                self.startFileWritingIfNeeded(deviceName: self.currentDeviceName ?? "System Default", format: result.nodeFormat)
+                self.logBluetooth.info("Recording restarted after format change", metadata: [
+                    "deviceName": self.currentDeviceName ?? "Unknown",
+                    "deviceID": self.currentDeviceIDForRecording ?? "default"
+                ])
+            } catch {
+                guard self.activeGeneration.load(ordering: .acquiring) == gen else { return }
+                self._isRecording.store(false, ordering: .releasing)
+                self.host.teardown(generation: gen)
+                self.logBluetooth.error("Failed to restart after format change",
+                                        parameters: [
+                                            "deviceName": self.currentDeviceName ?? "Unknown",
+                                            "deviceID": self.currentDeviceIDForRecording ?? "default",
+                                            "error": "\(error)"
+                                        ],
+                                        errorCode: "formatChangeRestartFailed")
+                self.onDeviceError?(self.currentDeviceName, .formatChanged)
+            }
         }
     }
 
     // MARK: - File Writing (T032)
 
-    private func startFileWritingIfNeeded(deviceName: String) {
+    private func startFileWritingIfNeeded(deviceName: String, format tapFormat: AVAudioFormat) {
         guard let settings = audioSaveSettings, settings.enabled else { return }
         guard let bookmarkData = settings.folderBookmark else {
             logAudio.info("Audio save enabled but no folder bookmark")
@@ -922,10 +959,6 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
         }
         isSecurityScopedAccessActive = true
         securityScopedURL = folderURL
-
-        guard let engine = engine else { return }
-        let inputNode = engine.inputNode
-        let tapFormat = inputNode.outputFormat(forBus: 0)
 
         do {
             _ = try audioFileWriter.startWriting(
@@ -956,47 +989,7 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
     }
 
     private static func deviceName(for deviceID: AudioDeviceID) -> String? {
-        var nameAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioObjectPropertyName,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        // T016/R-004: Use Unmanaged<CFString>? for safe CoreAudio interaction
-        var name: Unmanaged<CFString>?
-        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        guard AudioObjectGetPropertyData(deviceID, &nameAddress, 0, nil, &nameSize, &name) == noErr,
-              let cfString = name?.takeRetainedValue() else {
-            return nil
-        }
-        return cfString as String
-    }
-
-    private func selectDevice(id: String) -> AudioDeviceID? {
-        guard let deviceID = AudioDeviceID(id) else { return nil }
-        var inputAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreams,
-            mScope: kAudioObjectPropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var streamSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(deviceID, &inputAddress, 0, nil, &streamSize) == noErr,
-              streamSize > 0 else {
-            return nil
-        }
-        return deviceID
-    }
-
-    private func setInputDevice(_ deviceID: AudioDeviceID, on targetEngine: AVAudioEngine) {
-        var deviceID = deviceID
-        let audioUnit = targetEngine.inputNode.audioUnit!
-        AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
+        CoreAudioQuery.name(deviceID)
     }
 
     // MARK: - WAV Conversion

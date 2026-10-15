@@ -30,6 +30,24 @@ struct LogEntry: Codable, Sendable {
         self.error = error
     }
 
+    /// Создаёт LogEntry с произвольной меткой уровня. Используется только для WARN,
+    /// которого нет среди пользовательских режимов LogLevel (spec 015, research R12).
+    init(
+        severityLabel: String,
+        category: LogCategory,
+        sessionId: String,
+        message: String,
+        metadata: [String: String]? = nil
+    ) {
+        self.timestamp = Self.timestampFormatter.string(from: Date())
+        self.level = severityLabel
+        self.category = category.rawValue
+        self.sessionId = sessionId
+        self.message = message
+        self.metadata = metadata
+        self.error = nil
+    }
+
     private static let timestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

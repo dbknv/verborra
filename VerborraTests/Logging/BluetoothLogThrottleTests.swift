@@ -4,6 +4,8 @@ import Testing
 
 // MARK: - BluetoothLogThrottleTests (T066)
 
+/// Shares `BluetoothLogThrottle.shared`; `reset()` in a parallel test would clear another test's state.
+@Suite(.serialized)
 struct BluetoothLogThrottleTests {
 
     @Test func firstEvent_alwaysAllowed() {

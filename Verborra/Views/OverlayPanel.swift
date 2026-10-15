@@ -6,7 +6,9 @@ import SwiftUI
 final class OverlayPanel: NSPanel {
     private var hostingView: NSHostingView<AnyView>?
 
-    static let initialSize = NSSize(width: 800, height: 220)
+    /// Fixed pre-recording size (spec 015, FR-065): 200 pt fits the recording layout and the tallest
+    /// pre-recording view ("no microphone access", 154 pt) above the 45 pt bottom bar.
+    static let initialSize = NSSize(width: 800, height: 200)
 
     init() {
         super.init(
@@ -71,6 +73,7 @@ final class OverlayPanel: NSPanel {
 @Observable
 final class OverlayManager {
     private var panel: OverlayPanel?
+    private var keyMonitor: Any?
     private(set) var currentHeight: CGFloat = OverlayPanel.initialSize.height
     private var debounceTask: Task<Void, Never>?
 
@@ -95,7 +98,25 @@ final class OverlayManager {
 
     func dismiss() {
         debounceTask?.cancel()
+        removeKeyMonitor()
         panel?.dismiss()
+    }
+
+    /// Overlay keys (1-2-3, ⌥C, Esc…) apply only to events aimed at the overlay panel, so they
+    /// never intercept typing in Settings or other windows (spec 015, FR-020).
+    func installKeyMonitor(_ handler: @escaping (NSEvent) -> Bool) {
+        removeKeyMonitor()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let panel = self?.panel, event.window === panel else { return event }
+            return handler(event) ? nil : event
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+        }
+        keyMonitor = nil
     }
 
     func updateHeight(_ newHeight: CGFloat) {

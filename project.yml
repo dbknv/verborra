@@ -13,6 +13,9 @@ packages:
   KeyboardShortcuts:
     url: https://github.com/sindresorhus/KeyboardShortcuts
     from: "2.0.0"
+  swift-atomics:
+    url: https://github.com/apple/swift-atomics.git
+    from: "1.3.0"
 
 targets:
   Verborra:
@@ -23,7 +26,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.apeek.Verborra
-        MARKETING_VERSION: "1.3.0"
+        MARKETING_VERSION: "1.4.0"
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: Verborra/Info.plist
         CODE_SIGN_ENTITLEMENTS: Verborra/Verborra.entitlements
@@ -31,14 +34,18 @@ targets:
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "15.0"
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
-        CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: G292C8CN3X
-        CODE_SIGN_IDENTITY: "Apple Development"
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_OBJC_BRIDGING_HEADER: Verborra/Verborra-Bridging-Header.h
     dependencies:
       - package: swift-markdown
         product: Markdown
       - package: KeyboardShortcuts
         product: KeyboardShortcuts
+      - package: swift-atomics
+        product: Atomics
 
   VerborraTests:
     type: bundle.unit-test
@@ -48,5 +55,9 @@ targets:
     settings:
       base:
         SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "-"
     dependencies:
       - target: Verborra

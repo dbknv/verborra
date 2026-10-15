@@ -116,9 +116,10 @@ final class PromptsStoreTests: XCTestCase {
     // MARK: - T044: ensureSystemPrompts
 
     func testEnsureSystemPrompts_addsIfMissing() {
-        // Remove all system prompts manually
-        store.prompts.removeAll(where: { $0.isSystem })
-        store.save()
+        // Persist a prompts file without any system prompt, then reload it
+        let userOnly = store.prompts.filter { !$0.isSystem }
+        try? JSONEncoder().encode(userOnly).write(to: fileURL, options: .atomic)
+        store = PromptsStore(fileURL: fileURL)
 
         store.ensureSystemPrompts()
         let systemPrompt = store.prompts.first(where: { $0.systemId == "simple-voice-to-text" })
@@ -153,8 +154,10 @@ final class PromptsStoreTests: XCTestCase {
         try data.write(to: dedicatedURL, options: .atomic)
 
         // 2. Pin dataVersion to 2 so migrateIfNeeded enters the v2→v3 branch.
+        // The test host is the app itself — restore the real value afterwards.
+        let savedVersion = UserDefaults.standard.object(forKey: "promptsDataVersion")
         UserDefaults.standard.set(2, forKey: "promptsDataVersion")
-        defer { UserDefaults.standard.removeObject(forKey: "promptsDataVersion") }
+        defer { UserDefaults.standard.set(savedVersion, forKey: "promptsDataVersion") }
 
         // 3. Booting the store triggers migration.
         let migrated = PromptsStore(fileURL: dedicatedURL)
@@ -176,8 +179,8 @@ final class PromptsStoreTests: XCTestCase {
         // FR-009b: the migrated built-in must report read-only.
         XCTAssertTrue(svtt?.isReadOnly ?? false)
 
-        // 5. dataVersion key is bumped to current (3).
-        XCTAssertEqual(UserDefaults.standard.integer(forKey: "promptsDataVersion"), 3)
+        // 5. dataVersion key is bumped to current (4 since the v3 → v4 registry re-sync).
+        XCTAssertEqual(UserDefaults.standard.integer(forKey: "promptsDataVersion"), 4)
     }
 
     /// FR-009b: post-migration, the read-only prompt resists `updatePrompt` / `deletePrompt`.

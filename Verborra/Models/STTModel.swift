@@ -1,28 +1,39 @@
 import Foundation
 
-// MARK: - STTModel (T009)
+// MARK: - STTModel (T009, spec 015 T013)
 
 enum STTModel: String, Codable, CaseIterable {
-    case gpt4oMiniTranscribe = "gpt-4o-mini-transcribe"
-    case gpt4oTranscribe = "gpt-4o-transcribe"
-    case whisper1 = "whisper-1"
+    case gptTranscribe = "gpt-transcribe"
 
     var displayName: String {
         switch self {
-        case .gpt4oMiniTranscribe: return "GPT-4o Mini Transcribe"
-        case .gpt4oTranscribe: return "GPT-4o Transcribe"
-        case .whisper1: return "Whisper-1"
+        case .gptTranscribe: return "GPT Transcribe"
         }
     }
 
     var infoDescription: String {
         let l10n = LocalizationManager.shared
         switch self {
-        case .gpt4oMiniTranscribe: return l10n.string("model.stt.gpt4oMiniTranscribe.info")
-        case .gpt4oTranscribe: return l10n.string("model.stt.gpt4oTranscribe.info")
-        case .whisper1: return l10n.string("model.stt.whisper1.info")
+        case .gptTranscribe: return l10n.string("model.stt.gptTranscribe.info")
         }
     }
 
-    static var `default`: STTModel { .gpt4oMiniTranscribe }
+    static var `default`: STTModel { .gptTranscribe }
+
+    /// Прежнее значение по умолчанию (см. `LLMModel.legacyDefaultRawValue`).
+    static let legacyDefaultRawValue = "gpt-4o-mini-transcribe"
+
+    /// Как модель принимает язык распознавания в multipart-запросе.
+    enum LanguageField {
+        /// `language=<code>`
+        case singular
+        /// `languages[]=<code>`
+        case languagesArray
+    }
+
+    var languageField: LanguageField {
+        switch self {
+        case .gptTranscribe: return .languagesArray
+        }
+    }
 }

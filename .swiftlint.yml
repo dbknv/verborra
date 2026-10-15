@@ -1,0 +1,24 @@
+# SwiftLint is a development-only tool (constitution Principle 5): install with `brew install swiftlint`
+# and run `swiftlint lint Verborra VerborraTests`. It is not part of the build.
+included:
+  - Verborra
+  - VerborraTests
+excluded:
+  - builds
+  - Verborra.xcodeproj
+  - .build
+disabled_rules:
+  - line_length
+  - file_length
+  - type_body_length
+  - function_body_length
+  - identifier_name
+  - todo
+opt_in_rules: []
+
+# A `switch` over key codes or HTTP statuses is one decision, not many (key handlers, response mapping).
+cyclomatic_complexity:
+  ignores_case_statements: true
+# Small value tuples (test tables, mock responses) are clearer than one-off structs.
+large_tuple:
+  warning: 3

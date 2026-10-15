@@ -56,18 +56,21 @@ final class FormattingService: FormattingServiceProtocol, LLMServiceProtocol {
 
         // 014: callers pass an already-assembled prompt (via
         // `SystemPromptBuilder`). The service does NOT enhance it further.
-        // GPT-5 reasoning models reject custom `temperature` — see
-        // `LLMModel.supportsTemperature`. Omit the key for them.
+        // `temperature` and `reasoning_effort` are set per exact model — see the
+        // tables in `LLMModel.supportsTemperature` / `LLMModel.reasoningEffort`.
         var requestBody: [String: Any] = [
             "model": model.rawValue,
             "messages": [
                 ["role": "system", "content": systemPrompt],
-                ["role": "user", "content": text],
+                ["role": "user", "content": text]
             ],
-            "max_completion_tokens": 4000,
+            "max_completion_tokens": 4000
         ]
         if model.supportsTemperature {
             requestBody["temperature"] = 0.2
+        }
+        if let effort = model.reasoningEffort {
+            requestBody["reasoning_effort"] = effort.rawValue
         }
 
         var request = URLRequest(url: URL(string: baseURL)!)
@@ -82,12 +85,13 @@ final class FormattingService: FormattingServiceProtocol, LLMServiceProtocol {
             "headers": SensitiveMasker.maskHeaders(request.allHTTPHeaderFields ?? [:]).description,
             "model": model.rawValue,
             "temperature": model.supportsTemperature ? "0.2" : "omitted",
+            "reasoningEffort": model.reasoningEffort?.rawValue ?? "omitted",
             "maxTokens": "4000",
             "systemPrompt": String(systemPrompt.prefix(200)),
             "userText": String(text.prefix(200))
         ])
 
-        let result = try await performWithRetry(request: request)
+        let result = try await performWithRetry(request: request, model: model)
         let elapsed = Date().timeIntervalSince(requestStart)
         log.info("Chat Completions API response", metadata: [
             "status": "200",
@@ -100,7 +104,7 @@ final class FormattingService: FormattingServiceProtocol, LLMServiceProtocol {
         return result
     }
 
-    private func performWithRetry(request: URLRequest) async throws -> String {
+    private func performWithRetry(request: URLRequest, model: LLMModel) async throws -> String {
         var lastError: Error = RecordingError.formattingFailed("Unknown error")
 
         for attempt in 0..<maxRetries {
@@ -144,6 +148,21 @@ final class FormattingService: FormattingServiceProtocol, LLMServiceProtocol {
                     // this model. Only the default (1) value is supported." instead of
                     // just the HTTP status code.
                     let message = String(data: data, encoding: .utf8) ?? "Status \(httpResponse.statusCode)"
+                    // spec 015 (FR-040): the model isn't available — say so, never fall back to another model
+                    if RecordingError.isModelUnavailable(status: httpResponse.statusCode, body: message) {
+                        let openAIError = RecordingError.openAIError(in: message)
+                        log.error(
+                            "Model unavailable",
+                            parameters: [
+                                "method": "format",
+                                "model": model.rawValue,
+                                "status": "\(httpResponse.statusCode)",
+                                "message": String((openAIError.message ?? message).prefix(500))
+                            ],
+                            errorCode: openAIError.code ?? "\(httpResponse.statusCode)"
+                        )
+                        throw RecordingError.modelUnavailable(modelName: model.displayName, kind: .text)
+                    }
                     log.error(
                         "Chat Completions API error",
                         parameters: [
@@ -155,12 +174,9 @@ final class FormattingService: FormattingServiceProtocol, LLMServiceProtocol {
                     throw RecordingError.formattingFailed(message)
                 }
             } catch let error as RecordingError {
-                switch error {
-                case .apiKeyNotConfigured:
-                    throw error
-                default:
-                    lastError = error
-                }
+                // Retryable statuses (429, 5xx) `continue` above; any RecordingError thrown
+                // inside the loop (4xx, empty response) is final — retrying a 400 only delays the error.
+                throw error
             } catch let error as URLError where error.code == .notConnectedToInternet || error.code == .networkConnectionLost {
                 throw RecordingError.networkUnavailable
             } catch {
@@ -172,20 +188,24 @@ final class FormattingService: FormattingServiceProtocol, LLMServiceProtocol {
     }
 
     private func parseResponse(_ data: Data) throws -> String {
-        struct ChatResponse: Decodable {
-            struct Choice: Decodable {
-                struct Message: Decodable {
-                    let content: String
-                }
-                let message: Message
-            }
-            let choices: [Choice]
-        }
-
         let response = try JSONDecoder().decode(ChatResponse.self, from: data)
         guard let content = response.choices.first?.message.content, !content.isEmpty else {
             throw RecordingError.formattingFailed("Empty response from API")
         }
         return content
     }
+}
+
+// MARK: - Chat Completions response
+
+private struct ChatResponse: Decodable {
+    let choices: [ChatChoice]
+}
+
+private struct ChatChoice: Decodable {
+    let message: ChatMessageContent
+}
+
+private struct ChatMessageContent: Decodable {
+    let content: String
 }

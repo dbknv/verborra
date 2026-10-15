@@ -11,13 +11,10 @@ struct TokenEstimator {
     /// Лимит контекста для модели (в токенах)
     static func contextLimit(for model: LLMModel) -> Int {
         switch model {
-        case .gpt4oMini:
-            return 128_000
-        case .gpt41Mini,
-             .gpt5Nano, .gpt5Mini, .gpt51, .gpt52,
-             .gpt54Nano, .gpt54Mini, .gpt54, .gpt54Pro,
-             .gpt55, .gpt55Pro:
+        case .gpt52, .gpt54Mini, .gpt54, .gpt55:
             return 1_048_576
+        case .gpt56Terra, .gpt56Sol, .gpt6Luna, .gpt6Sol, .gpt61Sol, .gpt6Astra:
+            return 922_000
         }
     }
 

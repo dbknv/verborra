@@ -1,77 +1,89 @@
 import Foundation
 
-// MARK: - LLMModel (T010)
+// MARK: - LLMModel (T010, spec 015 T011)
 
+/// Текстовые модели. Порядок case = порядок в списке настроек (FR-030).
 enum LLMModel: String, Codable, CaseIterable {
-    case gpt4oMini = "gpt-4o-mini"
-    case gpt41Mini = "gpt-4.1-mini"
-    case gpt5Nano = "gpt-5-nano"
-    case gpt5Mini = "gpt-5-mini"
-    case gpt51 = "gpt-5.1"
     case gpt52 = "gpt-5.2"
-    case gpt54Nano = "gpt-5.4-nano"
     case gpt54Mini = "gpt-5.4-mini"
     case gpt54 = "gpt-5.4"
-    case gpt54Pro = "gpt-5.4-pro"
     case gpt55 = "gpt-5.5"
-    case gpt55Pro = "gpt-5.5-pro"
+    case gpt56Terra = "gpt-5.6-terra"
+    case gpt56Sol = "gpt-5.6-sol"
+    case gpt6Luna = "gpt-6-luna"
+    case gpt6Sol = "gpt-6-sol"
+    case gpt61Sol = "gpt-6.1-sol"
+    case gpt6Astra = "gpt-6-astra"
 
     var displayName: String {
         switch self {
-        case .gpt4oMini: return "GPT-4o Mini"
-        case .gpt41Mini: return "GPT-4.1 Mini"
-        case .gpt5Nano: return "GPT-5 Nano"
-        case .gpt5Mini: return "GPT-5 Mini"
-        case .gpt51: return "GPT-5.1"
         case .gpt52: return "GPT-5.2"
-        case .gpt54Nano: return "GPT-5.4 Nano"
         case .gpt54Mini: return "GPT-5.4 Mini"
         case .gpt54: return "GPT-5.4"
-        case .gpt54Pro: return "GPT-5.4 Pro"
         case .gpt55: return "GPT-5.5"
-        case .gpt55Pro: return "GPT-5.5 Pro"
+        case .gpt56Terra: return "GPT-5.6 Terra"
+        case .gpt56Sol: return "GPT-5.6 Sol"
+        case .gpt6Luna: return "GPT-6 Luna"
+        case .gpt6Sol: return "GPT-6 Sol"
+        case .gpt61Sol: return "GPT-6.1 Sol"
+        case .gpt6Astra: return "GPT-6 Astra"
         }
     }
 
     var infoDescription: String {
-        let l10n = LocalizationManager.shared
-        switch self {
-        case .gpt4oMini: return l10n.string("model.llm.gpt4oMini.info")
-        case .gpt41Mini: return l10n.string("model.llm.gpt41Mini.info")
-        case .gpt5Nano: return l10n.string("model.llm.gpt5Nano.info")
-        case .gpt5Mini: return l10n.string("model.llm.gpt5Mini.info")
-        case .gpt51: return l10n.string("model.llm.gpt51.info")
-        case .gpt52: return l10n.string("model.llm.gpt52.info")
-        case .gpt54Nano: return l10n.string("model.llm.gpt54Nano.info")
-        case .gpt54Mini: return l10n.string("model.llm.gpt54Mini.info")
-        case .gpt54: return l10n.string("model.llm.gpt54.info")
-        case .gpt54Pro: return l10n.string("model.llm.gpt54Pro.info")
-        case .gpt55: return l10n.string("model.llm.gpt55.info")
-        case .gpt55Pro: return l10n.string("model.llm.gpt55Pro.info")
-        }
+        LocalizationManager.shared.string("model.llm.\(caseName).info")
     }
 
-    static var `default`: LLMModel { .gpt51 }
+    static var `default`: LLMModel { .gpt6Luna }
 
-    /// `true` if the model accepts arbitrary `temperature` values in the
-    /// Chat Completions request. OpenAI's GPT-5 reasoning tier (the *-nano
-    /// and *-mini variants) only accepts the default value (1.0) and
-    /// returns 400 (`unsupported_value`) for anything else — confirmed
-    /// for `gpt-5-nano` and `gpt-5-mini` in production logs (see
-    /// `verborra-2026-05-29T13.jsonl`). The same heuristic is applied to
-    /// the gpt-5.4 family pending live confirmation:
-    /// - `gpt-5.4-nano`, `gpt-5.4-mini` → `false` (reasoning-tier convention)
-    /// - flagship and *-pro variants → `true` (accept arbitrary temperature)
-    ///
-    /// When `false`, callers (`StreamingFormattingService.buildRequest`,
-    /// `FormattingService` builders) MUST omit the `temperature` key from
-    /// the request body entirely.
+    /// Прежнее значение по умолчанию: пользователи без явного выбора хранили его
+    /// неявно, миграция (spec 015, US7) переводит их на новое значение по умолчанию.
+    static let legacyDefaultRawValue = "gpt-5.1"
+
+    /// `true`, если модель принимает произвольный `temperature` в Chat Completions.
+    /// Значения заданы для каждой модели отдельно (FR-035, research R21) и
+    /// подтверждаются живой проверкой из quickstart 5.2. Если `false`, вызывающий код
+    /// (`FormattingService`, `StreamingFormattingService.buildRequest`) НЕ отправляет
+    /// ключ `temperature` вообще — иначе OpenAI отвечает 400 `unsupported_value`.
     var supportsTemperature: Bool {
         switch self {
-        case .gpt5Nano, .gpt5Mini, .gpt54Nano, .gpt54Mini:
-            return false
-        case .gpt4oMini, .gpt41Mini, .gpt51, .gpt52, .gpt54, .gpt54Pro, .gpt55, .gpt55Pro:
-            return true
+        case .gpt52: return true
+        case .gpt54Mini: return false
+        case .gpt54: return true
+        case .gpt55: return true
+        case .gpt56Terra: return false
+        case .gpt56Sol: return false
+        case .gpt6Luna: return false
+        case .gpt6Sol: return false
+        case .gpt61Sol: return false
+        case .gpt6Astra: return false
         }
     }
+
+    /// Минимальный поддерживаемый `reasoning_effort` (research R20); `nil` — ключ не отправляется.
+    /// Значения заданы для каждой модели отдельно и подтверждаются quickstart 5.2.
+    var reasoningEffort: ReasoningEffort? {
+        switch self {
+        case .gpt52: return nil
+        case .gpt54Mini: return nil
+        case .gpt54: return nil
+        case .gpt55: return nil
+        case .gpt56Terra: return ReasoningEffort.none
+        case .gpt56Sol: return ReasoningEffort.none
+        case .gpt6Luna: return ReasoningEffort.none
+        case .gpt6Sol: return ReasoningEffort.none
+        case .gpt61Sol: return .low
+        case .gpt6Astra: return .low
+        }
+    }
+
+    /// Имя case для ключей локализации (`model.llm.<caseName>.info`).
+    private var caseName: String { String(describing: self) }
+}
+
+// MARK: - ReasoningEffort (spec 015, T012)
+
+enum ReasoningEffort: String {
+    case none
+    case low
 }

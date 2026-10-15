@@ -11,7 +11,9 @@ final class TargetAppTracker {
 
     func startTracking() {
         // Capture current frontmost app
+        // processIdentifier is -1 for an app that is launching or exiting — not a paste target.
         if let frontmost = NSWorkspace.shared.frontmostApplication,
+           frontmost.processIdentifier > 0,
            frontmost.bundleIdentifier != Bundle.main.bundleIdentifier {
             targetPID = frontmost.processIdentifier
             log.info("Target app captured", metadata: [
@@ -27,6 +29,7 @@ final class TargetAppTracker {
         ) { [weak self] notification in
             guard let self,
                   let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.processIdentifier > 0,
                   app.bundleIdentifier != Bundle.main.bundleIdentifier
             else { return }
             self.targetPID = app.processIdentifier

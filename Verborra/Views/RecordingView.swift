@@ -15,6 +15,8 @@ struct RecordingView: View {
                 switch viewModel.state {
                 case .idle:
                     idleView
+                case .starting:
+                    startingView
                 case .recording(let duration, let remaining):
                     recordingView(duration: duration, remaining: remaining)
                 case .transcribing:
@@ -85,6 +87,25 @@ struct RecordingView: View {
         }
     }
 
+    /// "Starting microphone…", or "Switching to <name>…" during a microphone switch (spec 015, US9).
+    private var startingCaption: String {
+        if case .switching(let name) = viewModel.startKind {
+            return l10n.string("recording.switching", args: name)
+        }
+        return l10n.string("recording.starting")
+    }
+
+    private var startingView: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text(startingCaption)
+                .font(.headline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(height: 110)
+    }
+
     private var transcribingView: some View {
         VStack(spacing: 12) {
             ProgressView()
@@ -118,7 +139,7 @@ struct RecordingView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.primary)
 
-            if case .apiKeyNotConfigured = error {
+            if error == .apiKeyNotConfigured || error.isModelUnavailable {
                 Button(l10n.string("recording.error.openSettings")) {
                     viewModel.openSettings()
                 }
@@ -159,7 +180,8 @@ struct RecordingView: View {
 
     private func isRetryableError(_ error: RecordingError) -> Bool {
         switch error {
-        case .transcriptionFailed, .formattingFailed, .networkUnavailable, .silenceDetected, .emptyTranscription:
+        case .transcriptionFailed, .formattingFailed, .networkUnavailable, .silenceDetected, .emptyTranscription,
+             .recordingStartFailed:
             return true
         default:
             return false

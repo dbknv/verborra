@@ -45,6 +45,7 @@ struct SettingsView: View {
     @Environment(PromptsStore.self) private var promptsStore
     @Environment(VocabularyStore.self) private var vocabularyStore
     @Environment(AudioDeviceManager.self) private var audioDeviceManager: AudioDeviceManager?
+    @Environment(LoginItemService.self) private var loginItemService: LoginItemService?
     @State private var viewModel: SettingsViewModel?
     @State private var selectedTab: SettingsTab = .general
 
@@ -91,7 +92,8 @@ struct SettingsView: View {
                 settings: appSettings,
                 promptsStore: promptsStore,
                 vocabularyStore: vocabularyStore,
-                audioDeviceManager: deviceManager
+                audioDeviceManager: deviceManager,
+                loginItemService: loginItemService
             )
         }
     }
@@ -144,12 +146,28 @@ struct GeneralSettingsTab: View {
             }
 
             Section(l10n.string("settings.general.system")) {
+                // spec 015 (US1): the toggle mirrors the real system state, not the saved intent.
                 Toggle(l10n.string("settings.general.launchAtLogin"), isOn: Binding(
-                    get: { viewModel.settings.launchAtLogin },
-                    set: { viewModel.updateLaunchAtLogin($0) }
+                    get: { viewModel.loginItemStatus == .enabled },
+                    set: { viewModel.setLaunchAtLogin($0) }
                 ))
 
-                if let error = viewModel.launchAtLoginError {
+                switch viewModel.loginItemStatus {
+                case .requiresApproval:
+                    loginItemHint(l10n.string("settings.general.launchAtLogin.needsApproval"))
+                case .notFound:
+                    loginItemHint(l10n.string("settings.general.launchAtLogin.notFound"))
+                case .enabled, .notRegistered:
+                    EmptyView()
+                }
+
+                if !viewModel.isRunningFromApplications {
+                    Text(String(format: l10n.string("settings.general.launchAtLogin.notInApplications"), viewModel.appFolderPath))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let error = viewModel.loginItemError {
                     Text(error)
                         .font(.caption)
                         .foregroundStyle(.red)
@@ -160,6 +178,7 @@ struct GeneralSettingsTab: View {
         .onAppear {
             // T013: Start monitoring via PermissionManager (FR-006)
             permissionManager.startMonitoring()
+            viewModel.refreshLoginItemStatus()
         }
         .onDisappear {
             permissionManager.stopMonitoring()
@@ -170,6 +189,17 @@ struct GeneralSettingsTab: View {
         }
         .onChange(of: permissionManager.accessibilityStatus) { _, _ in
             NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+    /// Caption plus "Open Login Items" for states the user has to fix in System Settings.
+    private func loginItemHint(_ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button(l10n.string("settings.general.launchAtLogin.openLoginItems")) {
+                viewModel.openLoginItemsSettings()
+            }
         }
     }
 }
@@ -221,16 +251,18 @@ struct PromptsSettingsTab: View {
             Divider()
 
             HStack(spacing: 4) {
-                Button(action: { viewModel.addPrompt() }) {
+                Button {
+                    viewModel.addPrompt()
+                } label: {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.borderless)
 
-                Button(action: {
+                Button {
                     if let id = viewModel.selectedPromptID {
                         viewModel.deletePrompt(id)
                     }
-                }) {
+                } label: {
                     Image(systemName: "minus")
                 }
                 .buttonStyle(.borderless)
@@ -261,9 +293,25 @@ struct PromptsSettingsTab: View {
             // which currently matches `simple-voice-to-text` only.
             let isReadOnly = viewModel.selectedPrompt?.isReadOnly == true
             VStack(alignment: .leading, spacing: 12) {
-                TextField(l10n.string("settings.prompts.name"), text: $viewModel.editingPromptName)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(isReadOnly)
+                VStack(alignment: .leading, spacing: 4) {
+                    TextField(l10n.string("settings.prompts.name"), text: $viewModel.editingPromptName)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(isReadOnly)
+
+                    // spec 015 (US10): n/30 counter; a longer name saved earlier must be shortened before saving
+                    if !isReadOnly {
+                        HStack(spacing: 6) {
+                            if viewModel.isPromptNameTooLong {
+                                Text(l10n.string("settings.prompts.nameTooLong"))
+                            }
+                            Spacer()
+                            Text("\(viewModel.editingPromptName.count)/\(SystemPrompt.maxNameLength)")
+                                .monospacedDigit()
+                        }
+                        .font(.caption)
+                        .foregroundStyle(viewModel.isPromptNameTooLong ? Color.red : Color.secondary)
+                    }
+                }
 
                 Text(l10n.string("settings.prompts.systemPrompt"))
                     .font(.caption)
@@ -285,6 +333,7 @@ struct PromptsSettingsTab: View {
                             viewModel.saveCurrentPrompt()
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(viewModel.isPromptNameTooLong)
                     }
                 }
             }

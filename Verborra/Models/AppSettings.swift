@@ -174,44 +174,25 @@ final class AppSettings {
         }
     }
 
-    @ObservationIgnored
-    @AppStorage("launchAtLogin")
-    var launchAtLogin: Bool = true
-
-    @ObservationIgnored
-    @AppStorage("recordingKeyCode")
-    var recordingKeyCode: Int = 49  // Space
-
-    @ObservationIgnored
-    @AppStorage("recordingModifiers")
-    var recordingModifiers: Int = 0  // No modifiers
-
-    var recordingKeyDisplayName: String {
-        let knownKeys: [Int: String] = [
-            49: "Space", 36: "Return", 48: "Tab", 51: "Delete", 53: "Escape",
-            76: "Enter", 123: "←", 124: "→", 125: "↓", 126: "↑",
-            122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5",
-            97: "F6", 98: "F7", 100: "F8", 101: "F9", 109: "F10",
-            103: "F11", 111: "F12",
-        ]
-        if let name = knownKeys[recordingKeyCode] {
-            return name
+    /// Намерение пользователя запускаться при входе (spec 015, US1). `nil` — пользователь ещё
+    /// не выбирал; вызывающий код трактует это как «включено». Реальное состояние — в `LoginItemService`.
+    var launchAtLoginIntent: Bool? {
+        get {
+            access(keyPath: \.launchAtLoginIntent)
+            return UserDefaults.standard.object(forKey: Self.launchAtLoginKey) as? Bool
         }
-        let source = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
-        guard let layoutData = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else {
-            return "Key \(recordingKeyCode)"
+        set {
+            withMutation(keyPath: \.launchAtLoginIntent) {
+                if let newValue {
+                    UserDefaults.standard.set(newValue, forKey: Self.launchAtLoginKey)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: Self.launchAtLoginKey)
+                }
+            }
         }
-        let layout = unsafeBitCast(layoutData, to: CFData.self)
-        let keyboardLayout = unsafeBitCast(CFDataGetBytePtr(layout), to: UnsafePointer<UCKeyboardLayout>.self)
-        var deadKeyState: UInt32 = 0
-        var chars = [UniChar](repeating: 0, count: 4)
-        var length: Int = 0
-        UCKeyTranslate(keyboardLayout, UInt16(recordingKeyCode), UInt16(kUCKeyActionDown),
-                        0, UInt32(LMGetKbdType()), UInt32(kUCKeyTranslateNoDeadKeysBit),
-                        &deadKeyState, chars.count, &length, &chars)
-        guard length > 0 else { return "Key \(recordingKeyCode)" }
-        return String(utf16CodeUnits: chars, count: length).uppercased()
     }
+
+    private static let launchAtLoginKey = "launchAtLogin"
 
     @ObservationIgnored
     @AppStorage("globalVoiceLanguage")
@@ -291,6 +272,7 @@ final class AppSettings {
             withMutation(keyPath: \.logLevel) {
                 logLevelRawValue = newValue.rawValue
             }
+            DiagnosticLogger.updateFilterSnapshot(level: newValue)
         }
     }
 

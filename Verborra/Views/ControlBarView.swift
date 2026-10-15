@@ -1,5 +1,4 @@
 import SwiftUI
-import KeyboardShortcuts
 
 // MARK: - ControlButton
 
@@ -37,8 +36,13 @@ struct ControlBarView: View {
         return false
     }
 
+    private var isStarting: Bool {
+        if case .starting = recordingState { return true }
+        return false
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Self.buttonGap) {
             Group {
                 switch windowPhase {
                 case .preProcessing:
@@ -49,33 +53,14 @@ struct ControlBarView: View {
             }
             .transition(.opacity.combined(with: .scale(scale: 0.95)))
 
-            Spacer()
+            // Never closer to the right-hand buttons than the normal button gap (FR-063)
+            Spacer(minLength: Self.buttonGap)
 
-            // Start/Stop button
-            if windowPhase == .preProcessing || !isProcessing {
-                controlBarButton(
-                    title: LocalizationManager.shared.string(isRecording ? "controlbar.stop" : "controlbar.start"),
-                    sfSymbol: isRecording ? "stop.fill" : "play.fill",
-                    hotkeyLabel: formattedShortcutLabel,
-                    isEnabled: windowPhase == .preProcessing ? (!isProcessing && viewModel.settings.hasApiKey && !viewModel.audioDeviceManager.isBluetoothSwitching) : true,
-                    action: {
-                        if isRecording {
-                            viewModel.stopRecording()
-                        } else if windowPhase == .preProcessing {
-                            viewModel.startRecording()
-                        }
-                    }
-                )
+            HStack(spacing: Self.buttonGap) {
+                rightButtons
             }
-
-            // Exit button
-            controlBarButton(
-                title: "Exit",
-                sfSymbol: "rectangle.portrait.and.arrow.right.fill",
-                hotkeyLabel: "Esc",
-                isEnabled: true,
-                action: { viewModel.dismissOverlay() }
-            )
+            .fixedSize()
+            .layoutPriority(3)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -86,6 +71,47 @@ struct ControlBarView: View {
             bottomTrailingRadius: 16,
             topTrailingRadius: 0
         ))
+    }
+
+    /// Spacing between bar buttons; also the minimum gap before the right-hand group.
+    private static let buttonGap: CGFloat = 8
+
+    /// Start/Stop/Cancel and Exit.
+    @ViewBuilder
+    private var rightButtons: some View {
+        // Start/Stop button; "Cancel" while the microphone is starting (spec 015, FR-013a)
+        if windowPhase == .preProcessing && isStarting {
+            controlBarButton(
+                title: LocalizationManager.shared.string("controlbar.cancel"),
+                sfSymbol: "xmark",
+                hotkeyLabel: formattedShortcutLabel,
+                isEnabled: true,
+                action: { viewModel.cancelStart(trigger: "button") }
+            )
+        } else if windowPhase == .preProcessing || !isProcessing {
+            controlBarButton(
+                title: LocalizationManager.shared.string(isRecording ? "controlbar.stop" : "controlbar.start"),
+                sfSymbol: isRecording ? "stop.fill" : "play.fill",
+                hotkeyLabel: formattedShortcutLabel,
+                isEnabled: windowPhase == .preProcessing ? (!isProcessing && viewModel.settings.hasApiKey && !viewModel.audioDeviceManager.isBluetoothSwitching) : true,
+                action: {
+                    if isRecording {
+                        viewModel.stopRecording()
+                    } else if windowPhase == .preProcessing {
+                        viewModel.startRecording()
+                    }
+                }
+            )
+        }
+
+        // Exit button
+        controlBarButton(
+            title: "Exit",
+            sfSymbol: "rectangle.portrait.and.arrow.right.fill",
+            hotkeyLabel: "Esc",
+            isEnabled: true,
+            action: { viewModel.dismissOverlay() }
+        )
     }
 
     // MARK: - Pre-Processing Buttons (State 1)
@@ -104,100 +130,118 @@ struct ControlBarView: View {
             .padding(.horizontal, 8)
         }
 
+        // spec 015 (R29): 1 microphone, 2 output language, 3 prompt; each menu starts with a title.
+        // Width (R34, FR-063, FR-064): each button follows its title, no fixed cap. When the row is too
+        // narrow the microphone title shrinks first (priority 0), then the prompt (1), then the language (2);
+        // the right-hand buttons never shrink.
+
         // Microphone (hotkey 1)
         controlBarMenu(
             title: microphoneTitle,
             sfSymbol: "mic.fill",
             hotkeyLabel: "1",
-            isEnabled: !isProcessing && !viewModel.audioDeviceManager.isBluetoothSwitching
+            isEnabled: !isProcessing && !isStarting && !viewModel.audioDeviceManager.isBluetoothSwitching,
+            truncatesTitle: true
         ) {
             let manager = viewModel.audioDeviceManager
-            // System Default first
-            if let systemDefault = manager.devices.first(where: { $0.isSystemDefaultEntry }) {
-                Button {
-                    viewModel.switchAudioDevice(to: systemDefault.uid)
-                } label: {
-                    HStack {
-                        Text(systemDefault.name)
-                        if manager.selectedDevice?.isSystemDefaultEntry == true {
-                            Image(systemName: "checkmark")
+            let realDevices = manager.devices.filter { !$0.isSystemDefaultEntry }
+            Section(LocalizationManager.shared.string("controlbar.menu.inputDevice")) {
+                // System Default first
+                if let systemDefault = manager.devices.first(where: { $0.isSystemDefaultEntry }) {
+                    Button {
+                        viewModel.switchAudioDevice(to: systemDefault.uid)
+                    } label: {
+                        HStack {
+                            Text(systemDefault.name)
+                            if manager.selectedDevice?.isSystemDefaultEntry == true {
+                                Image(systemName: "checkmark")
+                            }
                         }
+                    }
+
+                    // No trailing separator when System Default is the only entry
+                    if !realDevices.isEmpty {
+                        Divider()
                     }
                 }
 
-                Divider()
-            }
-
-            // Real devices (alphabetical)
-            ForEach(manager.devices.filter { !$0.isSystemDefaultEntry }) { device in
-                Button {
-                    viewModel.switchAudioDevice(to: device.uid)
-                } label: {
-                    HStack {
-                        Text(device.name)
-                        if device.uid == manager.selectedDevice?.uid {
-                            Image(systemName: "checkmark")
+                // Real devices (alphabetical)
+                ForEach(realDevices) { device in
+                    Button {
+                        viewModel.switchAudioDevice(to: device.uid)
+                    } label: {
+                        HStack {
+                            Text(device.name)
+                            if device.uid == manager.selectedDevice?.uid {
+                                Image(systemName: "checkmark")
+                            }
                         }
                     }
                 }
             }
         }
         .id(viewModel.audioDeviceManager.deviceListVersion) // FR-010: close on hot-plug
+        .layoutPriority(0)
 
-        // Text language (hotkey 2)
+        // Output language (hotkey 2)
         controlBarMenu(
             title: viewModel.selectedTextLanguage.localizedDisplayName(for: LocalizationManager.shared.currentLanguage),
             sfSymbol: "text.bubble.fill",
             hotkeyLabel: "2",
-            isEnabled: !isProcessing
+            isEnabled: !isProcessing && !isStarting,
+            truncatesTitle: true
         ) {
-            ForEach(SupportedLanguage.allCases, id: \.self) { language in
-                Button {
-                    viewModel.changeTextLanguage(language)
-                } label: {
-                    HStack {
-                        Text(language.localizedDisplayName(for: LocalizationManager.shared.currentLanguage))
-                        if language == viewModel.selectedTextLanguage {
-                            Image(systemName: "checkmark")
+            Section(LocalizationManager.shared.string("controlbar.menu.outputLanguage")) {
+                ForEach(SupportedLanguage.allCases, id: \.self) { language in
+                    Button {
+                        viewModel.changeTextLanguage(language)
+                    } label: {
+                        HStack {
+                            Text(language.localizedDisplayName(for: LocalizationManager.shared.currentLanguage))
+                            if language == viewModel.selectedTextLanguage {
+                                Image(systemName: "checkmark")
+                            }
                         }
                     }
                 }
             }
         }
+        .layoutPriority(2)
+
+        // Prompt (hotkey 3) — moved here from the window header (spec 015, FR-023);
+        // width follows the name up to the room left before the right-hand buttons (FR-063)
+        controlBarMenu(
+            title: PromptNameRule.display(viewModel.selectedPrompt.name),
+            sfSymbol: "text.quote",
+            hotkeyLabel: "3",
+            isEnabled: !isProcessing && !isStarting,
+            truncatesTitle: true
+        ) {
+            Section(LocalizationManager.shared.string("controlbar.menu.prompt")) {
+                ForEach(viewModel.promptsStore.prompts) { prompt in
+                    Button {
+                        viewModel.changePrompt(prompt, source: .menu)
+                    } label: {
+                        HStack {
+                            Text(prompt.name)
+                            if prompt.id == viewModel.selectedPrompt.id {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .layoutPriority(1)
     }
 
     private var microphoneTitle: String {
         viewModel.audioDeviceManager.selectedDevice?.name ?? "System Default"
     }
 
-    /// Formats the current global shortcut as modifier symbols separated by spaces (e.g. "⌥ Space", "⌘ ⇧ R").
-    @MainActor
+    /// The global shortcut as symbols separated by spaces, including 🌐︎ (e.g. "⌥ Space", "🌐︎ ⌘ R") — FR-028.
     private var formattedShortcutLabel: String {
-        guard let shortcut = KeyboardShortcuts.getShortcut(for: .toggleOverlay) else {
-            return ""
-        }
-
-        // shortcut.description returns e.g. "⌥Space", "⌘⇧R" — modifiers concatenated with key, no separators.
-        // We need to insert spaces between each modifier symbol and the key.
-        let desc = shortcut.description
-        let modifierSymbols: Set<Character> = ["⌃", "⌥", "⇧", "⌘"]
-
-        var parts: [String] = []
-        var keyPart = ""
-
-        for char in desc {
-            if modifierSymbols.contains(char) {
-                parts.append(String(char))
-            } else {
-                keyPart.append(char)
-            }
-        }
-
-        if !keyPart.isEmpty {
-            parts.append(keyPart)
-        }
-
-        return parts.joined(separator: " ")
+        ShortcutFormatter.string(GlobalShortcutStore.shared.current)
     }
 
     // MARK: - Post-Processing Buttons (State 2)
@@ -232,6 +276,7 @@ struct ControlBarView: View {
         sfSymbol: String,
         hotkeyLabel: String,
         isEnabled: Bool,
+        truncatesTitle: Bool = false,
         @ViewBuilder content: @escaping () -> Content
     ) -> some View {
         Menu {
@@ -241,7 +286,8 @@ struct ControlBarView: View {
                 title: title,
                 sfSymbol: sfSymbol,
                 hotkeyLabel: hotkeyLabel,
-                isEnabled: isEnabled
+                isEnabled: isEnabled,
+                truncatesTitle: truncatesTitle
             )
         }
         .buttonStyle(.plain)
@@ -270,13 +316,15 @@ struct ControlBarView: View {
     }
 }
 
-// MARK: - Shared Button Label (used by ControlBarView, MicrophoneSelectorButton, LanguageSelectorView)
+// MARK: - Shared Button Label (used by ControlBarView)
 
 struct ControlBarButtonLabel: View {
     let title: String
     let sfSymbol: String
     let hotkeyLabel: String
     let isEnabled: Bool
+    /// The title may shrink (tail-truncated) when the bar runs out of room; otherwise it keeps its full width.
+    var truncatesTitle = false
 
     var body: some View {
         HStack(spacing: 4) {
@@ -284,6 +332,9 @@ struct ControlBarButtonLabel: View {
                 .font(.system(size: 12))
             Text(title)
                 .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: !truncatesTitle, vertical: false)
 
             Text(hotkeyLabel)
                 .font(.system(size: 10, weight: .regular))

@@ -1,8 +1,6 @@
 import AppKit
 import AVFoundation
 import Foundation
-import KeyboardShortcuts
-import ServiceManagement
 
 // MARK: - SettingsViewModel (T036, T050)
 
@@ -16,7 +14,6 @@ final class SettingsViewModel {
     var isApiKeySaved = false
     var isValidating = false
     var validationResult: Bool?
-    var launchAtLoginError: String?
 
     // T015 [US2]: Use PermissionManager instead of local state (FR-015)
     var isAccessibilityGranted: Bool {
@@ -28,7 +25,18 @@ final class SettingsViewModel {
 
     // Prompt editing
     var selectedPromptID: UUID?
-    var editingPromptName: String = ""
+    /// Clamped to 30 characters while typing or pasting (spec 015, US10, research R32). Names loaded
+    /// from the store bypass the clamp, so a longer name saved before the limit is shown as is.
+    var editingPromptName: String = "" {
+        didSet {
+            guard !isLoadingPromptName else { return }
+            let clamped = PromptNameRule.clamp(new: editingPromptName, old: oldValue)
+            if clamped != editingPromptName { editingPromptName = clamped }
+        }
+    }
+    @ObservationIgnored private var isLoadingPromptName = false
+    /// The name is over the limit (only possible for prompts saved before it existed); Save is blocked.
+    var isPromptNameTooLong: Bool { editingPromptName.count > SystemPrompt.maxNameLength }
     var editingPromptContent: String = ""
     /// 013: Toggle state for the active prompt's `answerQuestionsInFirstMessage`.
     /// Mirrors the persisted value while the user is editing; saved via `saveCurrentPrompt()`.
@@ -37,6 +45,7 @@ final class SettingsViewModel {
     private let apiKeyValidationService: APIKeyValidationServiceProtocol
     let audioCaptureService: AudioCaptureServiceProtocol
     let audioDeviceManager: AudioDeviceManager
+    let loginItemService: LoginItemServiceProtocol
     private let log = DiagnosticLogger.logger(for: .settings)
 
     /// Non-System-Default devices for the settings picker.
@@ -55,7 +64,8 @@ final class SettingsViewModel {
         vocabularyStore: VocabularyStore,
         audioDeviceManager: AudioDeviceManager,
         apiKeyValidationService: APIKeyValidationServiceProtocol = APIKeyValidationService(),
-        audioCaptureService: AudioCaptureServiceProtocol? = nil
+        audioCaptureService: AudioCaptureServiceProtocol? = nil,
+        loginItemService: LoginItemServiceProtocol? = nil
     ) {
         self.settings = settings
         self.promptsStore = promptsStore
@@ -63,6 +73,7 @@ final class SettingsViewModel {
         self.audioDeviceManager = audioDeviceManager
         self.apiKeyValidationService = apiKeyValidationService
         self.audioCaptureService = audioCaptureService ?? AudioCaptureService()
+        self.loginItemService = loginItemService ?? LoginItemService(intentStore: settings)
         self.apiKeyInput = settings.apiKey
 
         if let first = promptsStore.prompts.first {
@@ -84,7 +95,7 @@ final class SettingsViewModel {
     private func refreshSelectedPrompt() {
         guard let id = selectedPromptID,
               let prompt = promptsStore.prompts.first(where: { $0.id == id }) else { return }
-        editingPromptName = prompt.name
+        loadPromptName(prompt.name)
         editingPromptContent = prompt.content
         editingAnswerInFirstMessage = prompt.answerQuestionsInFirstMessage
     }
@@ -129,9 +140,15 @@ final class SettingsViewModel {
 
     // MARK: - Prompts (T050)
 
+    private func loadPromptName(_ name: String) {
+        isLoadingPromptName = true
+        editingPromptName = name
+        isLoadingPromptName = false
+    }
+
     func selectPrompt(_ prompt: SystemPrompt) {
         selectedPromptID = prompt.id
-        editingPromptName = prompt.name
+        loadPromptName(prompt.name)
         editingPromptContent = prompt.content
         editingAnswerInFirstMessage = prompt.answerQuestionsInFirstMessage
     }
@@ -153,6 +170,7 @@ final class SettingsViewModel {
         // them — handled via `persistAnswerInFirstMessage()` (auto-saved on change
         // from the UI, since the read-only branch hides the Save button).
         guard !prompt.isReadOnly else { return }
+        guard !isPromptNameTooLong else { return }  // FR-060
 
         prompt.name = editingPromptName
         prompt.content = editingPromptContent
@@ -186,18 +204,6 @@ final class SettingsViewModel {
         promptsStore.setDefault(id)
     }
 
-    // MARK: - Hotkey Conflict Detection (T036)
-
-    var hasRecordingHotkeyConflict: Bool {
-        guard let overlayShortcut = KeyboardShortcuts.getShortcut(for: .toggleOverlay) else {
-            return false
-        }
-        let overlayKeyCode = Int(overlayShortcut.carbonKeyCode)
-        let overlayModifiers = Int(overlayShortcut.carbonModifiers)
-        return overlayKeyCode == settings.recordingKeyCode
-            && overlayModifiers == settings.recordingModifiers
-    }
-
     // MARK: - Onboarding (Debug)
 
     func resetOnboarding() {
@@ -206,22 +212,21 @@ final class SettingsViewModel {
 
     // MARK: - System
 
-    // T068: Логирование автозапуска (SMAppService)
-    func updateLaunchAtLogin(_ enabled: Bool) {
-        log.info("Launch at login", metadata: ["enabled": "\(enabled)"])
-        settings.launchAtLogin = enabled
-        do {
-            if enabled {
-                try SMAppService.mainApp.register()
-                log.info("SMAppService registered")
-            } else {
-                try SMAppService.mainApp.unregister()
-                log.info("SMAppService unregistered")
-            }
-            launchAtLoginError = nil
-        } catch {
-            log.error("SMAppService failed", parameters: ["enabled": "\(enabled)"], errorCode: error.localizedDescription)
-            launchAtLoginError = error.localizedDescription
-        }
+    // spec 015 (US1): launch at login goes through LoginItemService; the toggle shows the real system state.
+    var loginItemStatus: LoginItemStatus { loginItemService.status }
+    var loginItemError: String? { loginItemService.lastError }
+    var isRunningFromApplications: Bool { loginItemService.isRunningFromApplications }
+    var appFolderPath: String { loginItemService.appFolderPath }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        loginItemService.setEnabled(enabled)
+    }
+
+    func openLoginItemsSettings() {
+        loginItemService.openSystemSettings()
+    }
+
+    func refreshLoginItemStatus() {
+        loginItemService.refresh()
     }
 }

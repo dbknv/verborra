@@ -19,6 +19,12 @@ protocol OnboardingServiceProtocol {
 final class OnboardingViewModel: OnboardingServiceProtocol {
     var currentStep: OnboardingStep
     var audioLevel: Float = 0.0
+    /// spec 015 (US1): "Start Verborra at login" on the completion step, on by default.
+    var launchAtLoginChoice: Bool = true
+    var launchAtLoginError: String?
+    /// The login question is asked only on the first completed onboarding.
+    var asksLaunchAtLogin: Bool { !appSettings.isOnboardingCompleted }
+    private let loginItemService: LoginItemServiceProtocol
     private let log = DiagnosticLogger.logger(for: .lifecycle)
 
     // T014 [US2]: Use PermissionManager instead of local state (FR-015)
@@ -51,10 +57,12 @@ final class OnboardingViewModel: OnboardingServiceProtocol {
     init(
         audioCaptureService: AudioCaptureServiceProtocol? = nil,
         appSettings: AppSettings = AppSettings(),
-        apiKeyValidationService: APIKeyValidationServiceProtocol = APIKeyValidationService()
+        apiKeyValidationService: APIKeyValidationServiceProtocol = APIKeyValidationService(),
+        loginItemService: LoginItemServiceProtocol? = nil
     ) {
         self.audioCaptureService = audioCaptureService ?? AudioCaptureService()
         self.appSettings = appSettings
+        self.loginItemService = loginItemService ?? LoginItemService(intentStore: appSettings)
         self.apiKeyValidationService = apiKeyValidationService
         self.currentStep = .welcome
     }
@@ -76,6 +84,13 @@ final class OnboardingViewModel: OnboardingServiceProtocol {
     }
 
     func completeOnboarding() {
+        // spec 015 (FR-005): ask once — apply the choice before onboarding is marked complete.
+        // Onboarding is shown again when the microphone permission is missing; don't override
+        // an earlier choice then. A failure is logged but doesn't block finishing onboarding.
+        if asksLaunchAtLogin {
+            loginItemService.setEnabled(launchAtLoginChoice)
+            launchAtLoginError = loginItemService.lastError
+        }
         appSettings.isOnboardingCompleted = true
         stopMicTest()
     }
@@ -115,7 +130,8 @@ final class OnboardingViewModel: OnboardingServiceProtocol {
     private var levelTimer: Timer?
 
     func startMicTest() {
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
                 try await audioCaptureService.startRecording(deviceID: nil, maxDuration: .oneMinute)
                 // T027: Timer already on main thread — use updateLevelsFromAtomic (FR-019)
@@ -127,7 +143,7 @@ final class OnboardingViewModel: OnboardingServiceProtocol {
                     }
                 }
                 // T028: Subscribe to device errors
-                audioCaptureService.onDeviceError = { @Sendable [weak self] deviceName, reason in
+                audioCaptureService.onDeviceError = { @Sendable [weak self] _, _ in
                     guard let self else { return }
                     self.stopMicTest()
                     // Could set an error state here if needed

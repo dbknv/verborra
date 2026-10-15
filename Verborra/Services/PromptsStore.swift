@@ -23,12 +23,14 @@ final class PromptsStore {
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         load()
         migrateIfNeeded()
-        ensureSystemPrompts()
-
+        // Fresh install: seed the default prompt before adding the other system prompts,
+        // otherwise ensureSystemPrompts fills the list and no prompt is marked default.
+        let loadedCount = prompts.count
         if prompts.isEmpty {
             prompts = [SystemPrompt.makeDefault()]
-            save()
         }
+        ensureSystemPrompts()
+        if prompts.count != loadedCount { save() }
     }
 
     // For testing
@@ -36,15 +38,17 @@ final class PromptsStore {
         self.fileURL = fileURL
         load()
         migrateIfNeeded()
-        ensureSystemPrompts()
+        let loadedCount = prompts.count
         if prompts.isEmpty {
             prompts = [SystemPrompt.makeDefault()]
-            save()
         }
+        ensureSystemPrompts()
+        if prompts.count != loadedCount { save() }
     }
 
     // MARK: - Migration v1 → v2 → v3 (T042, 013-FR-009a/FR-009b)
 
+    // swiftlint:disable:next cyclomatic_complexity - data migrations v1→v4, pre-existing (013); splitting them risks user data
     private func migrateIfNeeded() {
         let version = UserDefaults.standard.integer(forKey: Self.dataVersionKey)
         guard version < Self.currentDataVersion else { return }

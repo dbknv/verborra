@@ -27,7 +27,7 @@ final class TranscriptionService: TranscriptionServiceProtocol, STTServiceProtoc
 
     func transcribe(audioData: Data, language: SupportedLanguage?, model: STTModel) async throws -> String {
         // T039: INFO — начало запроса
-        log.info("Whisper API request", metadata: [
+        log.info("Transcription API request", metadata: [
             "url": baseURL,
             "method": "POST",
             "payloadSize": "\(audioData.count) bytes",
@@ -57,40 +57,46 @@ final class TranscriptionService: TranscriptionServiceProtocol, STTServiceProtoc
         // model field
         body.appendMultipart(boundary: boundary, name: "model", value: model.rawValue)
 
-        // language field
+        // language field: name depends on the model (FR-033)
+        let languageFieldName: String
+        switch model.languageField {
+        case .singular: languageFieldName = "language"
+        case .languagesArray: languageFieldName = "languages[]"
+        }
         if let language {
-            body.appendMultipart(boundary: boundary, name: "language", value: language.apiCode)
+            body.appendMultipart(boundary: boundary, name: languageFieldName, value: language.apiCode)
         }
 
         // response_format
         body.appendMultipart(boundary: boundary, name: "response_format", value: "json")
 
-        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        body.append(Data("--\(boundary)--\r\n".utf8))
         request.httpBody = body
 
         // T039: DEBUG — заголовки и параметры запроса
-        log.debug("Whisper API request details", metadata: [
+        log.debug("Transcription API request details", metadata: [
             "headers": SensitiveMasker.maskHeaders(request.allHTTPHeaderFields ?? [:]).description,
             "model": model.rawValue,
             "language": language?.apiCode ?? "auto",
+            "languageField": languageFieldName,
             "responseFormat": "json",
             "audioSize": "\(audioData.count) bytes"
         ])
 
-        let result = try await performWithRetry(request: request)
+        let result = try await performWithRetry(request: request, model: model)
         let elapsed = Date().timeIntervalSince(requestStart)
-        log.info("Whisper API response", metadata: [
+        log.info("Transcription API response", metadata: [
             "status": "200",
             "elapsed": String(format: "%.2fs", elapsed),
             "resultLength": "\(result.count) chars"
         ])
-        log.debug("Whisper API response body", metadata: [
+        log.debug("Transcription API response body", metadata: [
             "transcription": String(result.prefix(500))
         ])
         return result
     }
 
-    private func performWithRetry(request: URLRequest) async throws -> String {
+    private func performWithRetry(request: URLRequest, model: STTModel) async throws -> String {
         var lastError: Error = RecordingError.transcriptionFailed("Unknown error")
 
         for attempt in 0..<maxRetries {
@@ -108,6 +114,7 @@ final class TranscriptionService: TranscriptionServiceProtocol, STTServiceProtoc
                 case 400:
                     // V009: Don't retry on 400 (client error)
                     let message = String(data: data, encoding: .utf8) ?? "Bad request"
+                    try throwIfModelUnavailable(status: 400, body: message, model: model)
                     throw RecordingError.transcriptionFailed(message)
                 case 413:
                     throw RecordingError.fileSizeLimitReached
@@ -120,15 +127,13 @@ final class TranscriptionService: TranscriptionServiceProtocol, STTServiceProtoc
                     continue
                 default:
                     let message = String(data: data, encoding: .utf8) ?? "Status \(httpResponse.statusCode)"
+                    try throwIfModelUnavailable(status: httpResponse.statusCode, body: message, model: model)
                     throw RecordingError.transcriptionFailed(message)
                 }
             } catch let error as RecordingError {
-                switch error {
-                case .apiKeyNotConfigured, .fileSizeLimitReached:
-                    throw error
-                default:
-                    lastError = error
-                }
+                // Retryable statuses (429, 5xx) `continue` above; any RecordingError thrown
+                // inside the loop (400, 401, 413, silence, bad response) is final (V009).
+                throw error
             } catch let error as URLError where error.code == .notConnectedToInternet || error.code == .networkConnectionLost {
                 throw RecordingError.networkUnavailable
             } catch {
@@ -139,11 +144,28 @@ final class TranscriptionService: TranscriptionServiceProtocol, STTServiceProtoc
         throw lastError
     }
 
+    /// spec 015 (FR-040): the model isn't available — say so, never fall back to another model.
+    private func throwIfModelUnavailable(status: Int, body: String, model: STTModel) throws {
+        guard RecordingError.isModelUnavailable(status: status, body: body) else { return }
+        let openAIError = RecordingError.openAIError(in: body)
+        log.error(
+            "Model unavailable",
+            parameters: [
+                "method": "transcribe",
+                "model": model.rawValue,
+                "status": "\(status)",
+                "message": String((openAIError.message ?? body).prefix(500))
+            ],
+            errorCode: openAIError.code ?? "\(status)"
+        )
+        throw RecordingError.modelUnavailable(modelName: model.displayName, kind: .speechToText)
+    }
+
     private func parseResponse(_ data: Data) throws -> String {
-        struct WhisperResponse: Decodable {
+        struct TranscriptionResponse: Decodable {
             let text: String
         }
-        let response = try JSONDecoder().decode(WhisperResponse.self, from: data)
+        let response = try JSONDecoder().decode(TranscriptionResponse.self, from: data)
         guard !response.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw RecordingError.silenceDetected
         }
@@ -155,16 +177,16 @@ final class TranscriptionService: TranscriptionServiceProtocol, STTServiceProtoc
 
 private extension Data {
     mutating func appendMultipart(boundary: String, name: String, filename: String, mimeType: String, data: Data) {
-        append("--\(boundary)\r\n".data(using: .utf8)!)
-        append("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
-        append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
+        append(Data("--\(boundary)\r\n".utf8))
+        append(Data("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(filename)\"\r\n".utf8))
+        append(Data("Content-Type: \(mimeType)\r\n\r\n".utf8))
         append(data)
-        append("\r\n".data(using: .utf8)!)
+        append(Data("\r\n".utf8))
     }
 
     mutating func appendMultipart(boundary: String, name: String, value: String) {
-        append("--\(boundary)\r\n".data(using: .utf8)!)
-        append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
-        append("\(value)\r\n".data(using: .utf8)!)
+        append(Data("--\(boundary)\r\n".utf8))
+        append(Data("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".utf8))
+        append(Data("\(value)\r\n".utf8))
     }
 }
