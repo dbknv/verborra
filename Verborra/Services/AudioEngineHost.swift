@@ -75,6 +75,8 @@ struct AudioSetupTimings: Sendable {
     var hwSampleRate: Double = 0
     var channels: UInt32 = 0
     var recreatedForStaleNode = false
+    /// The input node's client format was set to the device's rate after choosing the device.
+    var alignedClientFormat = false
 }
 
 /// A failure from the host, with the timings collected up to that point.
@@ -360,8 +362,11 @@ final class AudioEngineHost: AudioEngineHosting, @unchecked Sendable {
 
         setStep(.readFormats)
         clock = ContinuousClock.now
+        let hwRate = CoreAudioQuery.nominalSampleRate(resolved) ?? engine.inputNode.outputFormat(forBus: 0).sampleRate
+        if Self.alignClientFormat(of: engine.inputNode, to: hwRate) {
+            timings.alignedClientFormat = true
+        }
         let format = engine.inputNode.outputFormat(forBus: 0)
-        let hwRate = CoreAudioQuery.nominalSampleRate(resolved) ?? format.sampleRate
         timings.readFormatsMs += Self.ms(since: clock)
         timings.nodeSampleRate = format.sampleRate
         timings.hwSampleRate = hwRate
@@ -394,6 +399,28 @@ final class AudioEngineHost: AudioEngineHosting, @unchecked Sendable {
             throw AudioSetupFailure(error: .deviceUnavailable(step: "setDevice"), timings: AudioSetupTimings())
         }
         return deviceID
+    }
+
+    /// A new engine starts on the default input; after switching to another device its input node keeps
+    /// the old client rate (e.g. 44.1 kHz while the microphone runs at 48 kHz), and `start()` then fails
+    /// with -10868. Input AUHAL doesn't convert rates, so the client format is set to the device's rate.
+    /// Returns `true` when the format was changed.
+    private static func alignClientFormat(of node: AVAudioInputNode, to hardwareRate: Double) -> Bool {
+        let current = node.outputFormat(forBus: 0)
+        guard hardwareRate > 0, current.sampleRate != hardwareRate, let audioUnit = node.audioUnit else {
+            return false
+        }
+        var asbd = current.streamDescription.pointee
+        asbd.mSampleRate = hardwareRate
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioUnitProperty_StreamFormat,
+            kAudioUnitScope_Output,
+            1,
+            &asbd,
+            UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        )
+        return status == noErr
     }
 
     private func discardEngine() {

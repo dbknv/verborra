@@ -438,7 +438,8 @@ final class AudioCaptureService: AudioCaptureServiceProtocol {
             "nodeSampleRate": "\(timings.nodeSampleRate)",
             "hwSampleRate": "\(timings.hwSampleRate)",
             "channels": "\(timings.channels)",
-            "recreatedForStaleNode": "\(timings.recreatedForStaleNode)"
+            "recreatedForStaleNode": "\(timings.recreatedForStaleNode)",
+            "alignedClientFormat": "\(timings.alignedClientFormat)"
         ])
     }
 

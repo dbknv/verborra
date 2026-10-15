@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-10-15
+
+### Fixed
+
+- **"Couldn't start MacBook Pro Microphone (format 44100 Hz â‰  48000 Hz)"**: recording failed every time on a microphone selected by name when its sample rate differed from the system default input. The microphone's own rate is now used.
+
 ## [1.4.0] - 2026-10-15
 
 Reliability fixes, a new shortcut recorder with Fn support, a reworked floating window, and an updated OpenAI model list.
@@ -170,7 +176,8 @@ First public release. A complete, native macOS voice-input tool: global hotkey â
 - No telemetry. Network calls go only to the OpenAI API using the user-provided key.
 - Built with Swift 5.9+, SwiftUI, AppKit, AVFoundation, CoreAudio.
 
-[Unreleased]: https://github.com/dbknv/verborra/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/dbknv/verborra/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/dbknv/verborra/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/dbknv/verborra/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/dbknv/verborra/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/dbknv/verborra/compare/v1.0.0...v1.2.0
